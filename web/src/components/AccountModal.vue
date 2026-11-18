@@ -236,10 +236,10 @@ async function submitManual() {
   }
 
   // 账号级 NapCat：留空则回落到「系统设置 → 登录配置」里的全局地址/Token。
+  // napCatBase 始终提交，空串表示改回使用全局配置（否则已保存的地址无法清除）；
   // napCatKey 留空表示不修改已保存的值（服务端会忽略空串）。
   if (platform === 'qq') {
-    if (form.napCatBase.trim())
-      payload.napCatBase = form.napCatBase.trim()
+    payload.napCatBase = form.napCatBase.trim()
     if (form.napCatKey.trim())
       payload.napCatKey = form.napCatKey.trim()
     if (form.appId.trim())

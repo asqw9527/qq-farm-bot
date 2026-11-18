@@ -34,7 +34,12 @@ function parseKey(raw: string, source: string): Buffer {
     return buffer;
 }
 
-function resolveKey(filePath: string): Buffer {
+/**
+ * 取密钥。create=false 用于「读已有密文」：此时绝不能凭空生成新密钥，
+ * 否则密钥丢失会被静默换成一个新 key，接着解密失败，错误信息还看不出是密钥问题。
+ */
+function resolveKey(filePath: string, options: { create?: boolean } = {}): Buffer {
+    const allowCreate = options.create !== false;
     const envKey = String(process.env[KEY_ENV] || '').trim();
     if (envKey) return parseKey(envKey, KEY_ENV);
 
@@ -47,6 +52,14 @@ function resolveKey(filePath: string): Buffer {
     }
     if (existing.trim()) return parseKey(existing, '账号密钥文件 accounts.key');
 
+    if (!allowCreate) {
+        throw new Error(
+            `账号密钥缺失：${path.basename(filePath)} 已加密，但找不到密钥文件 ${KEY_FILE_NAME}。`
+            + `请从备份恢复该文件，或通过环境变量 ${KEY_ENV} 提供同一把 32 字节密钥；`
+            + `密钥丢失时只能删除账号文件后重新扫码添加账号。`,
+        );
+    }
+
     const created = crypto.randomBytes(32);
     // 0600：仅属主可读写。Windows 上 chmod 语义有限，但至少不会更宽松。
     fs.writeFileSync(target, `${created.toString('hex')}\n`, { mode: 0o600 });
@@ -58,13 +71,20 @@ function isEncryptedEnvelope(payload: any): boolean {
 }
 
 /**
- * 读取并（必要时）解密。返回 encrypted 标记，调用方据此决定是否把旧明文迁移成密文。
+ * 读取并（必要时）解密。encrypted 标记供调用方决定是否把旧明文迁移成密文；
+ * missing 表示文件原本不存在（首次启动），此时不应凭空创建文件。
  */
-function readSecureJson(filePath: string, fallbackFactory?: () => any): { data: any; encrypted: boolean } {
+function readSecureJson(filePath: string, fallbackFactory?: () => any): { data: any; encrypted: boolean; missing: boolean } {
+    let missing = false;
+    try {
+        missing = !fs.existsSync(filePath);
+    } catch {
+        missing = false;
+    }
     const payload = readJsonFileStrict(filePath, fallbackFactory);
-    if (!isEncryptedEnvelope(payload)) return { data: payload, encrypted: false };
+    if (!isEncryptedEnvelope(payload)) return { data: payload, encrypted: false, missing };
 
-    const key = resolveKey(filePath);
+    const key = resolveKey(filePath, { create: false });
     const iv = Buffer.from(String(payload.iv || ''), 'base64');
     const tag = Buffer.from(String(payload.tag || ''), 'base64');
     const body = Buffer.from(String(payload.data || ''), 'base64');
@@ -74,7 +94,7 @@ function readSecureJson(filePath: string, fallbackFactory?: () => any): { data: 
     const decipher = crypto.createDecipheriv(ALG, key, iv);
     decipher.setAuthTag(tag);
     const plain = Buffer.concat([decipher.update(body), decipher.final()]);
-    return { data: JSON.parse(plain.toString('utf8')), encrypted: true };
+    return { data: JSON.parse(plain.toString('utf8')), encrypted: true, missing: false };
 }
 
 function writeSecureJson(filePath: string, data: any, space = 2): void {

@@ -194,18 +194,36 @@ async function renderQrImage(content: string): Promise<string> {
 }
 
 // 通过 NapCat 内的 napcat-plugin-qq-farm-code 取农场 code。
-async function fetchFarmCode(base: string, pluginPath: string): Promise<FarmCode | null> {
+// appId / token 均可选：appId 覆盖默认小程序 appid（账号级配置），
+// token 用于 NapCat 对插件路由开了鉴权时放行——先按原样请求，
+// 失败且配置了 token 再带 Authorization 重试，不改变未开鉴权时的行为。
+async function fetchFarmCode(
+    base: string,
+    pluginPath: string,
+    options: { appId?: string; token?: string } = {},
+): Promise<FarmCode | null> {
     const endpoint = `${apiUrl(base, '/plugin')}/${pluginPath}/api/proto/code`;
-    const query = new URLSearchParams({ appid: QQ_MINIAPP_APP_ID });
+    const appId = String(options.appId || '').trim() || QQ_MINIAPP_APP_ID;
+    const query = new URLSearchParams({ appid: appId });
+    const url = `${endpoint}?${query.toString()}`;
+    const send = (headers?: Record<string, string>) => axios.get(url, {
+        timeout: CODE_TIMEOUT_MS,
+        validateStatus: (status: number) => status === 200,
+        ...(headers ? { headers } : {}),
+    });
     let response;
     try {
-        response = await axios.get(`${endpoint}?${query.toString()}`, {
-            timeout: CODE_TIMEOUT_MS,
-            validateStatus: (status: number) => status === 200,
-        });
+        response = await send();
     }
     catch {
-        return null;
+        const token = String(options.token || '').trim();
+        if (!token) return null;
+        try {
+            response = await send({ Authorization: `Bearer ${token}` });
+        }
+        catch {
+            return null;
+        }
     }
     const data = response?.data;
     if (!data || typeof data !== 'object')
@@ -477,7 +495,11 @@ async function refreshFarmCodeForAccount(account: any = {}): Promise<FarmCode> {
     if (!base)
         throw new Error('账号未配置 NapCat 地址，无法换取新 Code');
     const pluginPath = String(account?.pluginPath || DEFAULT_PLUGIN_PATH).trim() || DEFAULT_PLUGIN_PATH;
-    const result = await fetchFarmCode(base, pluginPath);
+    // 账号级 Token 优先，留空回落全局 NapCat 签名：NapCat 开了鉴权时插件路由也要带上，
+    // 否则换码会一直 401，表现为"插件没返回 Code"。
+    const token = String(account?.napCatKey || settings.napCatSignature || '').trim();
+    const appId = String(account?.appId || '').trim() || QQ_MINIAPP_APP_ID;
+    const result = await fetchFarmCode(base, pluginPath, { token, appId });
     if (!result || !result.code)
         throw new Error('NapCat 未返回农场 Code，请检查 qq-farm-code 插件与 QQ 登录状态');
     return result;

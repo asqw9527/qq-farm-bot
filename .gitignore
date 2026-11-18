@@ -13,6 +13,8 @@ core/data/
 # 账号文件加密密钥与迁移备份：绝不可提交，泄露即等于账号被接管
 accounts.key
 *.plain.bak
+# 测试运行时落在仓库根下的账号文件
+core/virtual-accounts.json
 
 # Debug/test scripts
 core/scripts/

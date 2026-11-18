@@ -46,7 +46,7 @@ interface WorkerManagerOptions {
     onWorkerLog?: (entry: any, accountId: string, accountName?: string) => void;
     getAccountById?: (accountId: string) => any;
     // 挤号/400 后换取新 Code：微信走本地长凭据，QQ 走账号绑定的 NapCat（含 uin 比对）
-    refreshAccountCode?: (account: any) => Promise<{ ok: boolean; code?: string; uin?: string; reason?: string }>;
+    refreshAccountCode?: (account: any) => Promise<{ ok: boolean; code?: string; uin?: string; reason?: string; warn?: string }>;
 }
 
 function createWorkerManager(options: WorkerManagerOptions) {
@@ -89,6 +89,10 @@ function createWorkerManager(options: WorkerManagerOptions) {
         attemptsLeft: number;
     };
     const reconnectWindows = new Map<string, ReconnectPlan>();
+    // 正在进行"手动启动前换码"的账号。换码要十几秒且期间没有 worker，
+    // 不加标记的话用户在换码途中再点一次启动，会因为重连计划已被清空而
+    // 直接拿旧 Code 同步启动，又撞一次 400。
+    const codeRefreshing = new Set<string>();
     const useThreadRuntime = runtimeMode === 'thread' && !(processRef as any).pkg && typeof WorkerThread === 'function';
 
     function createThreadWorker(account: any): any {
@@ -137,6 +141,8 @@ function createWorkerManager(options: WorkerManagerOptions) {
     function startWorker(account: any, options: { keepReconnectPlan?: boolean; skipCodeRefresh?: boolean } = {}): boolean {
         if (!account || !account.id) return false;
         if (workers[account.id]) return false;
+        // 已在换码中：把这次启动并入那一次，换码完成后会自行拉起，避免并发拿旧 Code 启动。
+        if (codeRefreshing.has(String(account.id))) return true;
         const pendingPlan = reconnectWindows.get(account.id);
         const resumingFromKickout = !options.keepReconnectPlan && !!pendingPlan && pendingPlan.mode === 'kickout';
         if (!options.keepReconnectPlan) cancelReconnectPlan(account.id, account.name, '已手动启动');
@@ -144,6 +150,8 @@ function createWorkerManager(options: WorkerManagerOptions) {
         // 手动启动发生在挤号等待期内时，账号里存的旧 Code 已被对方顶号作废，
         // 直接用它会撞 WS 400。这里先换新 Code，换不到才用旧 Code 兜底。
         if (resumingFromKickout && !options.skipCodeRefresh && typeof refreshAccountCode === 'function') {
+            const refreshKey = String(account.id);
+            codeRefreshing.add(refreshKey);
             void (async () => {
                 let target = account;
                 try {
@@ -156,6 +164,7 @@ function createWorkerManager(options: WorkerManagerOptions) {
                         log('系统', `账号 ${account.name} 手动启动：已换取新 Code`, {
                             accountId: String(account.id), accountName: account.name,
                         });
+                        if (outcome.warn) log('警告', `账号 ${account.name}：${outcome.warn}`, { accountId: String(account.id), accountName: account.name });
                         addAccountLog('kickout_code_refreshed', `账号 ${account.name} 手动启动已换取新 Code`, account.id, account.name, { trigger: 'manual_start' });
                     } else {
                         const reason = String(outcome?.reason || '未获取到新 Code');
@@ -169,8 +178,17 @@ function createWorkerManager(options: WorkerManagerOptions) {
                     log('错误', `账号 ${account.name} 手动启动：换取新 Code 异常（${reason}），使用旧 Code 尝试`, {
                         accountId: String(account.id), accountName: account.name,
                     });
+                } finally {
+                    // 先解除标记再拉起，否则内部这次调用会被当成"换码中"直接返回。
+                    codeRefreshing.delete(refreshKey);
+                    try {
+                        startWorker(target, { keepReconnectPlan: true, skipCodeRefresh: true });
+                    } catch (error: any) {
+                        log('错误', `账号 ${account.name} 手动启动失败: ${error && error.message ? error.message : error}`, {
+                            accountId: String(account.id), accountName: account.name,
+                        });
+                    }
                 }
-                startWorker(target, { keepReconnectPlan: true, skipCodeRefresh: true });
             })();
             return true;
         }
@@ -426,6 +444,8 @@ function createWorkerManager(options: WorkerManagerOptions) {
     // 挤号后的一次真实尝试：先换新 Code（旧 Code 已被对方顶号作废），
     // 换不到才退回旧 Code 兜底。整个过程保持计划不取消，直到真正拉起 worker。
     async function launchKickoutAttempt(accountId: string, account: any, name: string, attemptNo: number): Promise<void> {
+        // 用户手动启动正在换码：让那次换码结果决定，别并发再换一次（会连续换两张 Code）。
+        if (codeRefreshing.has(String(accountId))) return;
         let target = account;
         if (typeof refreshAccountCode === 'function') {
             // 换码可能要十几秒（QQ 要等插件、微信要做握手），给收尾判定留足余量，
@@ -446,6 +466,7 @@ function createWorkerManager(options: WorkerManagerOptions) {
                     log('系统', `账号 ${name} 已换取新 Code，第 ${attemptNo}/${KICKOUT_RECONNECT_ATTEMPTS} 次重连使用新 Code`, {
                         accountId: String(accountId), accountName: name,
                     });
+                    if (outcome.warn) log('警告', `账号 ${name}：${outcome.warn}`, { accountId: String(accountId), accountName: name });
                     addAccountLog('kickout_code_refreshed', `账号 ${name} 已换取新 Code，使用新 Code 重连`, accountId, name, { attempt: attemptNo });
                 } else {
                     const reason = String(outcome?.reason || '未获取到新 Code');

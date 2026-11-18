@@ -46,7 +46,7 @@ test('QQ：NapCat 登的是另一个号时拒绝写入（防串号）', async ()
     assert.match(outcome.reason, /不一致/);
 });
 
-test('QQ：老账号没有 uin 时不做比对，直接采用', async () => {
+test('QQ：老账号没有 uin 时不做比对，直接采用并给出串号警告', async () => {
     const { refreshAccountCode } = load({
         './qq-login/service': { refreshFarmCodeForAccount: async () => ({ code: 'QQ-NEW', uin: '10001', nickname: '' }) },
         '../utils/tsdk-runtime': { MINI_PROGRAM_APP_IDS: APP_IDS },
@@ -54,6 +54,30 @@ test('QQ：老账号没有 uin 时不做比对，直接采用', async () => {
     const outcome = await refreshAccountCode({ id: '1', platform: 'qq' });
     assert.equal(outcome.ok, true);
     assert.equal(outcome.uin, '10001', '应把 NapCat 返回的 uin 带回，便于补全账号');
+    assert.match(outcome.warn, /缺少 uin/, '应提示无法校验 NapCat 上是不是这个号');
+});
+
+test('QQ：uin 一致时不产生多余警告', async () => {
+    const { refreshAccountCode } = load({
+        './qq-login/service': { refreshFarmCodeForAccount: async () => ({ code: 'QQ-NEW', uin: '10001', nickname: '' }) },
+        '../utils/tsdk-runtime': { MINI_PROGRAM_APP_IDS: APP_IDS },
+    });
+    const outcome = await refreshAccountCode({ id: '1', platform: 'qq', uin: '10001' });
+    assert.equal(outcome.ok, true);
+    assert.equal(outcome.warn, undefined);
+});
+
+test('微信：账号级 appId 优先于官方值', async () => {
+    const calls = [];
+    const { refreshAccountCode } = load({
+        './wx-login/native-protocol': {
+            getNativeWxLoginCode: async (buffer, appId) => { calls.push({ buffer, appId }); return 'WX-NEW'; },
+        },
+        '../utils/tsdk-runtime': { MINI_PROGRAM_APP_IDS: APP_IDS },
+    });
+    const outcome = await refreshAccountCode({ id: '2', platform: 'wx', loginBuffer: 'BUF', appId: 'wxCUSTOM' });
+    assert.equal(outcome.ok, true);
+    assert.deepEqual(calls, [{ buffer: 'BUF', appId: 'wxCUSTOM' }]);
 });
 
 test('微信：用已保存的 loginBuffer 本地换 Code，appId 缺省用官方值', async () => {

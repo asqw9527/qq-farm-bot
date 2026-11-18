@@ -77,3 +77,29 @@ test('密文被篡改时解密失败而不是返回脏数据', () => {
 
     fs.rmSync(dir, { recursive: true, force: true });
 });
+
+test('密钥丢失时明确报错，且不会凭空生成新密钥覆盖排查线索', () => {
+    const dir = tempDir();
+    const file = path.join(dir, 'accounts.json');
+    const keyFile = path.join(dir, 'accounts.key');
+    writeSecureJson(file, { accounts: [{ id: '1', code: 'CODE-Y' }], nextId: 2 });
+    assert.equal(fs.existsSync(keyFile), true);
+
+    // 模拟密钥文件丢失（例如容器重建没挂载数据目录）
+    fs.unlinkSync(keyFile);
+    assert.throws(() => readSecureJson(file), /账号密钥缺失/, '应提示密钥缺失而不是解密失败');
+    assert.equal(fs.existsSync(keyFile), false, '读取阶段不应自动生成新密钥');
+
+    fs.rmSync(dir, { recursive: true, force: true });
+});
+
+test('账号文件不存在时标记 missing，调用方不会凭空创建文件', () => {
+    const dir = tempDir();
+    const file = path.join(dir, 'accounts.json');
+    const loaded = readSecureJson(file, () => ({ accounts: [], nextId: 1 }));
+    assert.equal(loaded.missing, true);
+    assert.equal(loaded.encrypted, false);
+    assert.equal(fs.existsSync(file), false, '只读不应创建账号文件');
+
+    fs.rmSync(dir, { recursive: true, force: true });
+});

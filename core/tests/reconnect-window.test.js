@@ -369,3 +369,38 @@ test('等待期内手动启动：立即取消等待并先换新 Code 再连', as
     assert.equal(starts.at(-1).config.code, 'CODE-MANUAL', '手动启动应使用新换的 Code');
 });
 
+
+test('手动启动换码期间重复点击启动：只换一次码、只启动一次，不会拿旧 Code 撞 400', async () => {
+    const clock = makeClock();
+    let release;
+    const gate = new Promise(resolve => { release = resolve; });
+    let calls = 0;
+    const h = buildManager({
+        clock,
+        options: {
+            refreshAccountCode: async () => { calls += 1; await gate; return { ok: true, code: 'CODE-NEW' }; },
+        },
+    });
+    const worker = h.attachWorker();
+    emitMessage(h, worker, { type: 'account_kicked', reason: '已在其他终端登录' });
+    delete h.workers['acc-1'];
+
+    const before = h.messages.filter(m => m && m.type === 'start').length;
+    assert.equal(h.manager.startWorker(h.account), true, '第一次启动应进入换码流程');
+    // 换码还没返回（真实场景要十几秒），此时用户又点了一次启动
+    assert.equal(h.manager.startWorker(h.account), true, '换码中的重复启动应并入同一次');
+    assert.equal(
+        h.messages.filter(m => m && m.type === 'start').length,
+        before,
+        '换码期间不能同步用旧 Code 启动 worker',
+    );
+
+    release();
+    await flush();
+    await flush();
+
+    assert.equal(calls, 1, '只应换一次 Code');
+    const starts = h.messages.filter(m => m && m.type === 'start');
+    assert.equal(starts.length, before + 1, '换码完成后只启动一次');
+    assert.equal(starts.at(-1).config.code, 'CODE-NEW', '应使用换到的新 Code');
+});

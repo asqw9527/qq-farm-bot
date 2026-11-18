@@ -22,7 +22,8 @@ function loadAccounts(): AccountsData {
         const data = normalizeAccountsData(raw);
         // 旧版本是明文 JSON：读到明文时立刻加密回写（含一次 .plain.bak 备份）。
         // 迁移失败不阻塞读取，后续任何保存都会写成密文。
-        if (!loaded.encrypted) {
+        // 文件本来就不存在（首次启动）时不写：保持"没账号就没有文件"的原行为。
+        if (!loaded.encrypted && !loaded.missing) {
             try { migratePlaintextIfNeeded(ACCOUNTS_FILE, data); } catch { /* 交给下次保存 */ }
         }
         accountsCache = data;

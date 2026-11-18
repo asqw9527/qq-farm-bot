@@ -21,6 +21,8 @@ export interface CodeRefreshOutcome {
     code?: string;
     uin?: string;
     reason?: string;
+    /** 换码成功但存在风险（例如老账号缺 uin，无法校验 NapCat 上是不是这个号）。 */
+    warn?: string;
 }
 
 function normalizeUin(value: unknown): string {
@@ -50,5 +52,10 @@ export async function refreshAccountCode(account: any): Promise<CodeRefreshOutco
             reason: `NapCat 当前登录的 QQ（${gotUin}）与账号（${expectedUin}）不一致，已放弃写入`,
         };
     }
-    return { ok: true, code: String(result.code).trim(), uin: gotUin || expectedUin };
+    // 老账号（本次改造前创建）没有 uin，只能相信 NapCat 上登的就是这个号。
+    // 首次换码会把返回的 uin 补写进账号，之后就能真正校验，属于一次性放行。
+    const warn = !expectedUin && gotUin
+        ? `账号缺少 uin，无法校验 NapCat 当前登录号（${gotUin}），已按该号写入并将 uin 补记到账号`
+        : '';
+    return { ok: true, code: String(result.code).trim(), uin: gotUin || expectedUin, ...(warn ? { warn } : {}) };
 }
