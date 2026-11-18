@@ -51,14 +51,33 @@ const storedTab = localStorage.getItem('settings-active-tab')
 const settingsTabKeys: SettingsTab[] = ['account', 'strategy', 'automation', 'system']
 // 牧场的自动化与养殖策略已移到「牧场策略」页，设置页只保留账号与系统。
 const ranchTabKeys: SettingsTab[] = ['account', 'system']
+// 系统设置仅管理员可见，普通用户进入设置页时自动回落到账号管理。
+const isAdmin = computed(() => userStore.isAdmin)
+const allowedTabKeys = computed<SettingsTab[]>(() => {
+  const keys = inRanch.value ? ranchTabKeys : settingsTabKeys
+  return isAdmin.value ? keys : keys.filter(key => key !== 'system')
+})
+
+function resolveInitialTab(candidate: SettingsTab | string): SettingsTab {
+  if (allowedTabKeys.value.includes(candidate as SettingsTab))
+    return candidate as SettingsTab
+  if (!isAdmin.value && (candidate === 'system' || candidate === 'user'))
+    return 'account'
+  return allowedTabKeys.value[0] ?? 'account'
+}
+
 const queryTab = String(route.query.tab || '')
 const storedInitialTab = settingsTabKeys.includes(queryTab as SettingsTab)
-  ? queryTab as SettingsTab
-  : storedTab === 'user' ? 'system' : (storedTab as SettingsTab) || 'account'
-const initialTab = inRanch.value && !ranchTabKeys.includes(storedInitialTab) ? 'account' : storedInitialTab
+  ? resolveInitialTab(queryTab)
+  : resolveInitialTab(storedTab || 'account')
+const initialTab = ref<SettingsTab>(storedInitialTab)
 const activeTab = ref<SettingsTab>(initialTab)
 
 watch(activeTab, (newTab) => {
+  if (!allowedTabKeys.value.includes(newTab)) {
+    activeTab.value = allowedTabKeys.value[0] ?? 'account'
+    return
+  }
   localStorage.setItem('settings-active-tab', newTab)
   if (String(route.query.tab || '') !== newTab) {
     router.replace({
@@ -69,9 +88,9 @@ watch(activeTab, (newTab) => {
 
 watch(() => route.query.tab, (value) => {
   const nextTab = String(value || '')
-  if (inRanch.value && !ranchTabKeys.includes(nextTab as SettingsTab))
+  if (!allowedTabKeys.value.includes(nextTab as SettingsTab))
     return
-  if (settingsTabKeys.includes(nextTab as SettingsTab) && nextTab !== activeTab.value)
+  if (nextTab !== activeTab.value)
     activeTab.value = nextTab as SettingsTab
 })
 
@@ -82,10 +101,10 @@ const tabs = [
   { key: 'system', label: '系统设置', icon: 'i-carbon-settings' },
 ] as const
 
-const visibleTabs = computed(() => inRanch.value ? tabs.filter(tab => ranchTabKeys.includes(tab.key)) : tabs)
+const visibleTabs = computed(() => tabs.filter(tab => allowedTabKeys.value.includes(tab.key)))
 
 function setActiveTab(value: string) {
-  if (tabs.some(tab => tab.key === value))
+  if (allowedTabKeys.value.includes(value as SettingsTab))
     activeTab.value = value as typeof activeTab.value
 }
 
@@ -151,13 +170,17 @@ const stoppedAccounts = computed(() => accounts.value.filter((acc: any) => !acc.
 const stoppedAccountsCount = computed(() => stoppedAccounts.value.length)
 
 onMounted(async () => {
+  // 先刷新角色，避免未加载完成时短暂显示管理员专属入口。
+  await userStore.fetchUserInfo()
   await accountStore.fetchAccounts()
   if (!currentAccountId.value && accounts.value.length > 0 && accounts.value[0]) {
     accountStore.selectAccount(String(accounts.value[0].id))
   }
   if (currentAccountId.value)
     await loadStrategyData(currentAccountId.value)
-  await Promise.all([loadSystemConfig(), loadDevicePresets()])
+  // 系统配置为管理员专用，普通用户跳过请求，避免触发 403。
+  if (isAdmin.value)
+    await Promise.all([loadSystemConfig(), loadDevicePresets()])
 })
 
 function openSettings(account: any) {
@@ -1964,8 +1987,8 @@ async function handleResetSystemConfig() {
           />
         </div>
 
-        <!-- 系统设置 -->
-        <div v-else-if="activeTab === 'system'" class="space-y-4">
+        <!-- 系统设置（仅管理员） -->
+        <div v-else-if="activeTab === 'system' && isAdmin" class="space-y-4">
           <h3 class="text-lg text-gray-900 font-bold dark:text-gray-100">
             系统设置
           </h3>

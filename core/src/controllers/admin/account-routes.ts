@@ -11,6 +11,7 @@ const userStore = require('../../models/user-store');
 const { addOrUpdateAccount, deleteAccount } = store;
 const { findAccountByRef } = require('../../services/account-resolver');
 const { updateRuntimeConfig, getRuntimeConfig, getDefaultSystemConfig, getDevicePresets, getTimeZoneOptions } = require('../../config/config');
+const { emitAllLogsSnapshot } = require('./socket');
 
 const {
     getAccId,
@@ -19,6 +20,9 @@ const {
     getAccountList,
     resolveAccId,
     isAdminUser,
+    requireAdmin,
+    getVisibleAccountLogs,
+    getVisibleLogs,
 } = require('./middleware');
 
 function mountAccountRoutes(app: Application, ctx: AdminContext): void {
@@ -184,13 +188,17 @@ function mountAccountRoutes(app: Application, ctx: AdminContext): void {
         }
     });
 
-    // API: 账号日志
+    // API: 账号日志（按当前用户归属过滤，避免泄露其他用户账号的操作日志）
     app.get('/api/account-logs', (req: Request, res: Response) => {
         try {
             const limit = Number.parseInt(req.query.limit as string) || 100;
-            let list: any[] = ctx.provider.getAccountLogs ? ctx.provider.getAccountLogs(limit) : [];
-            if (!Array.isArray(list)) list = [];
-
+            const accountId = String(req.query.accountId || '').trim();
+            let list = getVisibleAccountLogs(ctx, req as any, limit);
+            if (accountId && accountId !== 'all') {
+                const resolved = resolveAccId(ctx, accountId, req as any);
+                if (!resolved) return res.json([]);
+                list = list.filter(entry => String((entry as any).accountId || '') === resolved);
+            }
             // 与当前 web 前端保持一致：直接返回数组
             res.json(list);
         } catch (e: any) {
@@ -261,11 +269,8 @@ function mountAccountRoutes(app: Application, ctx: AdminContext): void {
                     logs: Array.isArray(accountLogs) ? accountLogs : [],
                 });
 
-                const allLogs = ctx.provider.getLogs('', { limit: 100 });
-                ctx.io.to('account:all').emit('logs:snapshot', {
-                    accountId: 'all',
-                    logs: Array.isArray(allLogs) ? allLogs : [],
-                });
+                // 全体视图按每个 socket 的归属范围推送，避免把全局日志发给普通用户。
+                emitAllLogsSnapshot(ctx);
             }
 
             res.json({ ok: true, data });
@@ -300,8 +305,8 @@ function mountAccountRoutes(app: Application, ctx: AdminContext): void {
         }
     });
 
-    // API: 设置面板主题
-    app.post('/api/settings/theme', async (req: Request, res: Response) => {
+    // API: 设置面板主题（全局设置，仅管理员）
+    app.post('/api/settings/theme', requireAdmin, async (req: Request, res: Response) => {
         try {
             const theme = String((req.body || {}).theme || '');
             const data = await ctx.provider.setUITheme(theme);
@@ -311,8 +316,8 @@ function mountAccountRoutes(app: Application, ctx: AdminContext): void {
         }
     });
 
-    // API: 保存下线提醒配置
-    app.post('/api/settings/offline-reminder', async (req: Request, res: Response) => {
+    // API: 保存下线提醒配置（全局设置，仅管理员）
+    app.post('/api/settings/offline-reminder', requireAdmin, async (req: Request, res: Response) => {
         try {
             const body = (req.body && typeof req.body === 'object') ? req.body : {};
             const channel = String(body.channel || '').trim().toLowerCase();
@@ -331,8 +336,8 @@ function mountAccountRoutes(app: Application, ctx: AdminContext): void {
         }
     });
 
-    // API: 测试下线提醒推送（不落盘）
-    app.post('/api/settings/offline-reminder/test', async (req: Request, res: Response) => {
+    // API: 测试下线提醒推送（不落盘，仅管理员）
+    app.post('/api/settings/offline-reminder/test', requireAdmin, async (req: Request, res: Response) => {
         try {
             const saved = store.getOfflineReminder ? store.getOfflineReminder() : {};
             const body = (req.body && typeof req.body === 'object') ? req.body : {};
@@ -417,10 +422,13 @@ function mountAccountRoutes(app: Application, ctx: AdminContext): void {
             const autoAcceptHarvestStealHarvest = id && (typeof store.getAutoAcceptHarvestStealHarvest === 'function') ? store.getAutoAcceptHarvestStealHarvest(id) : 8;
             const autoAcceptHarvestStealSteal = id && (typeof store.getAutoAcceptHarvestStealSteal === 'function') ? store.getAutoAcceptHarvestStealSteal(id) : 1;
             const ui = store.getUI();
-            const offlineReminder = store.getOfflineReminder
+            // 系统级配置（主题、下线提醒含 Webhook Token）仅管理员可见，
+            // 普通用户只拿到自己账号的自动化/策略设置。
+            const isAdmin = isAdminUser(req as any);
+            const offlineReminder = isAdmin && store.getOfflineReminder
                 ? store.getOfflineReminder()
                 : { channel: 'webhook', endpoint: '', token: '', secret: '', title: '账号下线提醒', msg: '账号下线', offlineDeleteSec: 0 };
-            res.json({ ok: true, data: { intervals, strategy, preferredSeed, friendQuietHours, automation, stealDelaySeconds, plantOrderRandom, plantDelaySeconds, fertilizerBuyOrganicCount, fertilizerBuyOrganicThresholdHours, fertilizerBuyNormalCount, fertilizerBuyNormalThresholdHours, fertilizerBuyCheckIntervalMinutes, bagSeedPriority, bagSeedMultiLandReservationEnabled, bagSeedLandTypes, bagSeedFallbackStrategy, autoAcceptFriendMinLevel, autoAcceptRequireOwnLevel, autoAcceptHarvestStealEnabled, autoAcceptHarvestStealHarvest, autoAcceptHarvestStealSteal, ui, offlineReminder } });
+            res.json({ ok: true, data: { intervals, strategy, preferredSeed, friendQuietHours, automation, stealDelaySeconds, plantOrderRandom, plantDelaySeconds, fertilizerBuyOrganicCount, fertilizerBuyOrganicThresholdHours, fertilizerBuyNormalCount, fertilizerBuyNormalThresholdHours, fertilizerBuyCheckIntervalMinutes, bagSeedPriority, bagSeedMultiLandReservationEnabled, bagSeedLandTypes, bagSeedFallbackStrategy, autoAcceptFriendMinLevel, autoAcceptRequireOwnLevel, autoAcceptHarvestStealEnabled, autoAcceptHarvestStealHarvest, autoAcceptHarvestStealSteal, ui: isAdmin ? ui : {}, offlineReminder } });
         } catch (e: any) {
             handleApiError(res, e);
         }
@@ -439,7 +447,7 @@ function mountAccountRoutes(app: Application, ctx: AdminContext): void {
         }
     });
 
-    app.get('/api/settings/device-presets', (_req: Request, res: Response) => {
+    app.get('/api/settings/device-presets', requireAdmin, (_req: Request, res: Response) => {
         try {
             res.json({ ok: true, data: getDevicePresets() });
         } catch (e: any) {
@@ -447,7 +455,7 @@ function mountAccountRoutes(app: Application, ctx: AdminContext): void {
         }
     });
 
-    app.get('/api/settings/system-config', (_req: Request, res: Response) => {
+    app.get('/api/settings/system-config', requireAdmin, (_req: Request, res: Response) => {
         try {
             res.json({
                 ok: true,
@@ -466,18 +474,28 @@ function mountAccountRoutes(app: Application, ctx: AdminContext): void {
         }
     });
 
-    app.get('/api/settings/login-config', (_req: Request, res: Response) => {
+    // 登录方式开关：普通用户添加账号时需要知道哪些扫码方式可用。
+    // 但 NapCat 接口地址/签名属于系统凭据，仅管理员可见。
+    app.get('/api/settings/login-config', (req: Request, res: Response) => {
         try {
             const loginSettings = store.getLoginSettings
                 ? store.getLoginSettings()
                 : { wechatQrLogin: true, qqQrLogin: false, napCatEndpoint: '', napCatSignature: '' };
-            res.json({ ok: true, data: loginSettings });
+            const data = isAdminUser(req as any)
+                ? loginSettings
+                : {
+                    wechatQrLogin: loginSettings.wechatQrLogin,
+                    qqQrLogin: loginSettings.qqQrLogin,
+                    napCatEndpoint: '',
+                    napCatSignature: '',
+                };
+            res.json({ ok: true, data });
         } catch (e: any) {
             handleApiError(res, e);
         }
     });
 
-    app.post('/api/settings/login-config', (req: Request, res: Response) => {
+    app.post('/api/settings/login-config', requireAdmin, (req: Request, res: Response) => {
         try {
             const body = (req.body && typeof req.body === 'object') ? req.body : {};
             const loginSettings = store.setLoginSettings
@@ -494,7 +512,7 @@ function mountAccountRoutes(app: Application, ctx: AdminContext): void {
         }
     });
 
-    app.post('/api/settings/system-config', (req: Request, res: Response) => {
+    app.post('/api/settings/system-config', requireAdmin, (req: Request, res: Response) => {
         try {
             const { serverUrl, clientVersion, wxClientVersion, platform, os, timeZone, deviceInfo } = req.body || {};
             const saved = store.setSystemConfig({ serverUrl, clientVersion, wxClientVersion, platform, os, timeZone, deviceInfo });
@@ -509,7 +527,7 @@ function mountAccountRoutes(app: Application, ctx: AdminContext): void {
         }
     });
 
-    app.post('/api/settings/system-config/reset', (_req: Request, res: Response) => {
+    app.post('/api/settings/system-config/reset', requireAdmin, (_req: Request, res: Response) => {
         try {
             const saved = getDefaultSystemConfig();
             store.setSystemConfig(saved);

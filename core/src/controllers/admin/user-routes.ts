@@ -88,7 +88,8 @@ function mountUserRoutes(app: Application, ctx: AdminContext): void {
     app.post('/api/users/renew', (req: Request, res: Response) => {
         try {
             const { cardCode } = req.body || {};
-            let username = String((req.body || {}).username || '') || currentUsername(req);
+            // 续费只作用于当前登录用户：body.username 一律忽略，禁止给他人账号续费。
+            const username = currentUsername(req);
             if (!username || !cardCode) return res.status(400).json({ ok: false, error: '参数错误' });
             const result = userStore.renewUser(username, String(cardCode));
             if (!result.ok) return res.status(400).json({ ok: false, error: result.error });

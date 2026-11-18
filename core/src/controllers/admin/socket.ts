@@ -10,12 +10,12 @@ const userStore = require('../../models/user-store');
 
 const {
     resolveAccId,
+    getVisibleAccountLogs,
+    getVisibleLogs,
 } = require('./middleware');
 
-function applySocketSubscription(ctx: AdminContext, socket: any, accountRef: string = ''): void {
-    const incoming = String(accountRef || '').trim();
-    // 复用 HTTP 鉴权的用户解析：由 token 得到当前用户，构造轻量 req 供归属过滤使用。
-    // 无映射 token 视为管理员，保持旧行为；普通用户仅能订阅归属自己的账号。
+// 由 socket token 还原当前用户，构造与 HTTP 中间件一致的轻量 req。
+function socketRequest(ctx: AdminContext, socket: any): any {
     const token = String(socket.data.adminToken || '');
     let currentUser = ctx.tokenUsers && token ? ctx.tokenUsers.get(token) : undefined;
     if (!currentUser && token) {
@@ -23,7 +23,23 @@ function applySocketSubscription(ctx: AdminContext, socket: any, accountRef: str
         if (resolvedUser) currentUser = resolvedUser;
     }
     if (!currentUser) currentUser = { username: 'admin', role: 'admin', accountLimit: -1 };
-    const reqLike = { currentUser, headers: {} };
+    return { currentUser, headers: {} };
+}
+
+// 按 socket 所属用户的可见范围，向 account:all 房间逐个推送运行日志快照。
+function emitAllLogsSnapshot(ctx: AdminContext): void {
+    if (!ctx.io || !ctx.provider || typeof ctx.provider.getLogs !== 'function') return;
+    const room = ctx.io.sockets.sockets;
+    for (const socket of room.values()) {
+        if (!socket.rooms.has('account:all')) continue;
+        const logs = getVisibleLogs(ctx, socketRequest(ctx, socket), '', { limit: 100 });
+        socket.emit('logs:snapshot', { accountId: 'all', logs });
+    }
+}
+
+function applySocketSubscription(ctx: AdminContext, socket: any, accountRef: string = ''): void {
+    const reqLike = socketRequest(ctx, socket);
+    const incoming = String(accountRef || '').trim();
     const resolved = incoming && incoming !== 'all' ? resolveAccId(ctx, incoming, reqLike) : '';
 
     for (const room of socket.rooms) {
@@ -44,23 +60,17 @@ function applySocketSubscription(ctx: AdminContext, socket: any, accountRef: str
             const currentStatus = ctx.provider.getStatus(targetId);
             socket.emit('status:update', { accountId: targetId, status: currentStatus });
         }
-        if (ctx.provider && typeof ctx.provider.getLogs === 'function') {
-            let currentLogs: any[] = ctx.provider.getLogs(targetId, { limit: 100 });
-            if (!Array.isArray(currentLogs)) currentLogs = [];
+        // 日志快照按当前用户可见范围过滤；普通用户订阅 all 时只收到自己账号的日志。
+        const currentLogs = getVisibleLogs(ctx, reqLike, targetId, { limit: 100 });
+        socket.emit('logs:snapshot', {
+            accountId: targetId || 'all',
+            logs: currentLogs,
+        });
 
-            socket.emit('logs:snapshot', {
-                accountId: targetId || 'all',
-                logs: currentLogs,
-            });
-        }
-        if (ctx.provider && typeof ctx.provider.getAccountLogs === 'function') {
-            let currentAccountLogs: any[] = ctx.provider.getAccountLogs(100);
-            if (!Array.isArray(currentAccountLogs)) currentAccountLogs = [];
-
-            socket.emit('account-logs:snapshot', {
-                logs: currentAccountLogs,
-            });
-        }
+        const currentAccountLogs = getVisibleAccountLogs(ctx, reqLike, 100);
+        socket.emit('account-logs:snapshot', {
+            logs: currentAccountLogs,
+        });
     } catch {
         // ignore snapshot push errors
     }
@@ -86,6 +96,16 @@ function setupSocketIO(ctx: AdminContext): void {
         const token = authToken || headerToken;
         if (!token || !ctx.tokens.has(token)) {
             return next(new Error('Unauthorized'));
+        }
+        // 普通用户 token 需与 HTTP 保持一致的实时校验（到期/卡密失效即时断连）。
+        const resolvedUser = ctx.tokenUsers && ctx.tokenUsers.get(token)
+            || userStore.getAuthResultByToken(token);
+        if (resolvedUser && resolvedUser.role !== 'admin' && resolvedUser.role !== 'super_admin') {
+            const validated = userStore.validateUserToken(token);
+            if (!validated.ok) {
+                ctx.tokens.delete(token);
+                return next(new Error('Unauthorized'));
+            }
         }
         socket.data.adminToken = token;
         return next();
@@ -140,6 +160,7 @@ function emitRealtimeAccountLog(ctx: AdminContext, entry: any): void {
 
 module.exports = {
     setupSocketIO,
+    emitAllLogsSnapshot,
     emitRealtimeStatus,
     emitRealtimeLog,
     emitRealtimeAccountLog,

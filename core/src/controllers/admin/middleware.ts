@@ -70,6 +70,14 @@ function isAdminUser(req: AuthenticatedRequest): boolean {
     return !!user && (user.role === 'admin' || user.role === 'super_admin');
 }
 
+function requireAdmin(req: AuthenticatedRequest, res: Response, next: NextFunction): void {
+    if (!isAdminUser(req)) {
+        res.status(403).json({ ok: false, error: '仅管理员可访问该设置' });
+        return;
+    }
+    next();
+}
+
 // 当前用户可见的账号列表：管理员可见全部，普通用户仅可见归属自己的账号（含未绑定旧账号）
 function getAccountList(ctx: AdminContext, req?: AuthenticatedRequest): any[] {
     let accounts: any[];
@@ -96,6 +104,40 @@ function getAccountList(ctx: AdminContext, req?: AuthenticatedRequest): any[] {
 
 function getAccountIds(ctx: AdminContext, req?: AuthenticatedRequest): string[] {
     return getAccountList(ctx, req).map((account: any) => String(account.id || '')).filter(Boolean);
+}
+
+// 账号操作日志：普通用户仅可见归属自己账号的日志；管理员可见全部。
+function getVisibleAccountLogs(ctx: AdminContext, req: AuthenticatedRequest | undefined, limit: number): any[] {
+    let list: any[] = [];
+    if (ctx.provider && typeof ctx.provider.getAccountLogs === 'function') {
+        const data = ctx.provider.getAccountLogs(limit);
+        if (Array.isArray(data)) list = data;
+    }
+    if (!req || !req.currentUser || isAdminUser(req)) return list;
+    const ids = new Set(getAccountIds(ctx, req));
+    return list.filter(entry => ids.has(String(entry?.accountId || '')));
+}
+
+// 运行日志快照：accountId 为空表示"全部账号"。普通用户按可见账号逐账号取日志再合并，
+// 避免 provider.getLogs('') 直接返回全局日志造成跨用户泄露。
+function getVisibleLogs(ctx: AdminContext, req: AuthenticatedRequest | undefined, accountId: string, options: any = {}): any[] {
+    if (!ctx.provider || typeof ctx.provider.getLogs !== 'function') return [];
+    if (accountId) {
+        const data = ctx.provider.getLogs(accountId, options);
+        return Array.isArray(data) ? data : [];
+    }
+    if (!req || !req.currentUser || isAdminUser(req)) {
+        const data = ctx.provider.getLogs('', options);
+        return Array.isArray(data) ? data : [];
+    }
+    const limit = Number(options.limit) || 100;
+    const merged: any[] = [];
+    for (const id of getAccountIds(ctx, req)) {
+        const data = ctx.provider.getLogs(id, { ...options, limit });
+        if (Array.isArray(data)) merged.push(...data);
+    }
+    merged.sort((a: any, b: any) => (Number(b.ts || 0) - Number(a.ts || 0)) || String(b.time || '').localeCompare(String(a.time || '')));
+    return merged.slice(0, limit);
 }
 
 const isSoftRuntimeError = (err: any): boolean => {
@@ -176,8 +218,11 @@ module.exports = {
     issueToken,
     createAuthRequired,
     isAdminUser,
+    requireAdmin,
     getAccountList,
     getAccountIds,
+    getVisibleAccountLogs,
+    getVisibleLogs,
     isSoftRuntimeError,
     isGatewayProtocolError,
     getProtocolErrorMessage,

@@ -24,9 +24,11 @@ function sendError(res: Response, error: any, fallback: string): void {
 function mountQqLoginRoutes(app: Application, ctx: AdminContext): void {
     app.use('/api/qq-login', createAuthRequired(ctx));
 
-    app.post('/api/qq-login/tasks', async (_req: Request, res: Response) => {
+    const ownerOf = (req: Request): string => String((req as any).currentUser?.username || '');
+
+    app.post('/api/qq-login/tasks', async (req: Request, res: Response) => {
         try {
-            const task = await createLoginTask();
+            const task = await createLoginTask(ownerOf(req));
             res.json({ ok: true, data: publicTask(task) });
         }
         catch (error: any) {
@@ -36,7 +38,7 @@ function mountQqLoginRoutes(app: Application, ctx: AdminContext): void {
 
     app.post('/api/qq-login/tasks/:taskId/status', async (req: Request, res: Response) => {
         try {
-            const task = await queryLoginStatus(String(req.params.taskId || ''));
+            const task = await queryLoginStatus(String(req.params.taskId || ''), ownerOf(req));
             res.json({ ok: true, data: publicTask(task) });
         }
         catch (error: any) {
@@ -46,7 +48,7 @@ function mountQqLoginRoutes(app: Application, ctx: AdminContext): void {
 
     app.post('/api/qq-login/tasks/:taskId/code', async (req: Request, res: Response) => {
         try {
-            const result = await getMiniappCode(String(req.params.taskId || ''));
+            const result = await getMiniappCode(String(req.params.taskId || ''), ownerOf(req));
             res.json({ ok: true, data: { code: result.code, nickname: result.nickname || '', app_id: QQ_MINIAPP_APP_ID } });
         }
         catch (error: any) {
@@ -56,7 +58,7 @@ function mountQqLoginRoutes(app: Application, ctx: AdminContext): void {
 
     app.post('/api/qq-login/tasks/:taskId/cancel', async (req: Request, res: Response) => {
         try {
-            await cancelLoginTask(String(req.params.taskId || ''));
+            await cancelLoginTask(String(req.params.taskId || ''), ownerOf(req));
             res.json({ ok: true });
         }
         catch (error: any) {

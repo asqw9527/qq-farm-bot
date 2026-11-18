@@ -35,6 +35,7 @@ export interface QqMiniappLoginResult {
 
 interface QqSession {
     id: string;
+    owner: string;
     base: string;
     token: string;
     cred: string;
@@ -234,6 +235,7 @@ async function fetchQqProfile(base: string, cred: string): Promise<QqProfile> {
 function createSession(values: Partial<QqSession> & Pick<QqSession, 'base' | 'token' | 'cred' | 'pluginPath' | 'qrUrl' | 'qrImage' | 'status'>): QqSession {
     const session: QqSession = {
         id: makeId(),
+        owner: '',
         code: '',
         nickname: '',
         uin: '',
@@ -248,10 +250,12 @@ function createSession(values: Partial<QqSession> & Pick<QqSession, 'base' | 'to
     return session;
 }
 
-function getSession(taskId: string): QqSession {
+function getSession(taskId: string, owner?: string): QqSession {
     const session = sessions.get(String(taskId || '').trim());
     if (!session)
         throw new Error('QQ 登录会话不存在或已过期');
+    if (owner && session.owner && session.owner !== owner)
+        throw new Error('无权访问该登录任务');
     return session;
 }
 
@@ -306,8 +310,16 @@ async function clearStaleSession(base: string, token: string, cred: string): Pro
     return await resetQqSession(base, token);
 }
 
-async function createLoginTask(): Promise<QqLoginTask> {
+async function createLoginTask(owner = ''): Promise<QqLoginTask> {
     const settings = loginSettings();
+    // NapCat 是单实例：新任务会让此前所有任务的二维码/授权作废，统一标记为完成，
+    // 避免旧 taskId 被再次轮询或换取新登录产生的 code。
+    for (const previous of sessions.values()) {
+        if (!previous.done) {
+            previous.done = true;
+            previous.status = 'expired';
+        }
+    }
     const base = settings.napCatEndpoint;
     const token = settings.napCatSignature;
 
@@ -342,6 +354,7 @@ async function createLoginTask(): Promise<QqLoginTask> {
         throw new Error('二维码图片生成失败');
 
     const session = createSession({
+        owner,
         base,
         token,
         cred,
@@ -353,8 +366,8 @@ async function createLoginTask(): Promise<QqLoginTask> {
     return toTask(session);
 }
 
-async function queryLoginStatus(taskId: string): Promise<QqLoginTask> {
-    const session = getSession(taskId);
+async function queryLoginStatus(taskId: string, owner?: string): Promise<QqLoginTask> {
+    const session = getSession(taskId, owner);
     if (session.done || Date.now() > session.expiresAt) {
         session.status = 'expired';
         return toTask(session);
@@ -405,8 +418,8 @@ async function queryLoginStatus(taskId: string): Promise<QqLoginTask> {
     return toTask(session);
 }
 
-async function getMiniappCode(taskId: string): Promise<QqMiniappLoginResult> {
-    const session = getSession(taskId);
+async function getMiniappCode(taskId: string, owner?: string): Promise<QqMiniappLoginResult> {
+    const session = getSession(taskId, owner);
     if (!session.code) {
         const farmCode = await fetchFarmCode(session.base, session.pluginPath);
         if (farmCode) {
@@ -431,10 +444,12 @@ async function getMiniappCode(taskId: string): Promise<QqMiniappLoginResult> {
         : { code: session.code };
 }
 
-async function cancelLoginTask(taskId: string): Promise<void> {
+async function cancelLoginTask(taskId: string, owner?: string): Promise<void> {
     const session = sessions.get(String(taskId || '').trim());
     if (!session)
         return;
+    if (owner && session.owner && session.owner !== owner)
+        throw new Error('无权访问该登录任务');
     const hadActiveLogin = session.status === 'confirmed' || session.status === 'scanned';
     session.done = true;
     session.status = 'cancelled';

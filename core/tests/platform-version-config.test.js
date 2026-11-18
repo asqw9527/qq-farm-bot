@@ -141,7 +141,9 @@ test('saving or resetting connection settings never restarts live QQ or WeChat a
         const h = memoryStore(null);
         const { mountAccountRoutes } = load('controllers/admin/account-routes.js', { '../../models/store': h.store });
         let broadcasts = 0;
-        mountAccountRoutes({ get() {}, post: (route, handler) => routes.set(route, handler), delete() {}, put() {} }, { provider: {
+        // 路由现在带有 requireAdmin 中间件，mock 取最后一个 handler 并注入管理员身份。
+        const register = (route, ...handlers) => routes.set(route, handlers[handlers.length - 1]);
+        mountAccountRoutes({ get: register, post: register, delete() {}, put() {} }, { provider: {
             getAccounts: () => ({ accounts: [{ id: 'qq' }, { id: 'wx' }] }),
             isAccountRunning: () => true,
             restartAccount: () => assert.fail('Must not replay a used Code or disconnect another platform'),
@@ -149,10 +151,11 @@ test('saving or resetting connection settings never restarts live QQ or WeChat a
         } });
         let response;
         const res = { json: value => { response = value; } };
-        routes.get('/api/settings/system-config')({ body: { ...saved, wxClientVersion: 'wx-changed' } }, res);
+        const adminReq = { currentUser: { username: 'admin', role: 'admin' }, body: {} };
+        routes.get('/api/settings/system-config')({ ...adminReq, body: { ...saved, wxClientVersion: 'wx-changed' } }, res);
         assert.equal(response.ok, true);
         assert.equal(response.data.saved.wxClientVersion, 'wx-changed');
-        routes.get('/api/settings/system-config/reset')({}, res);
+        routes.get('/api/settings/system-config/reset')(adminReq, res);
         assert.equal(response.ok, true);
         assert.equal(response.data.current.wxClientVersion, config.DEFAULT_WX_CLIENT_VERSION);
         assert.equal(broadcasts, 2);
