@@ -17,9 +17,10 @@ interface DataProviderOptions {
     broadcastConfigToWorkers: (accountId?: string) => void;
     buildConfigSnapshotForAccount: (accountId: string) => any;
     broadcastGameConfigReload?: () => void;
-    startWorker: (account: any) => boolean;
+    startWorker: (account: any, options?: { keepReconnectPlan?: boolean }) => boolean;
     stopWorker: (accountId: string) => void;
     restartWorker: (account: any) => void;
+    cancelReconnect?: (accountId: string) => boolean;
 }
 
 function createDataProvider(options: DataProviderOptions) {
@@ -41,6 +42,7 @@ function createDataProvider(options: DataProviderOptions) {
         startWorker,
         stopWorker,
         restartWorker,
+        cancelReconnect,
     } = options;
 
     function getStoredAccountsList(): any[] {
@@ -436,6 +438,8 @@ function createDataProvider(options: DataProviderOptions) {
             const accountId = resolveAccountRefId(accountRef);
             const acc = findAccountByAnyRef(accountId || accountRef);
             if (!acc) return false;
+            // 手动停止要连同等待中的自动重连一起取消，否则停止后会被定时任务重新拉起。
+            if (accountId && typeof cancelReconnect === 'function') cancelReconnect(accountId);
             if (accountId) stopWorker(accountId);
             return true;
         },

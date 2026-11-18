@@ -66,7 +66,7 @@ function createRuntimeEngine(options: RuntimeEngineOptions = {}) {
         sendConfiguredPush,
     } = reloginReminder;
 
-    const { startWorker, stopWorker, restartWorker, callWorkerApi } = createWorkerManager({
+    const { startWorker, stopWorker, restartWorker, callWorkerApi, cancelReconnect } = createWorkerManager({
         fork,
         WorkerThread: Worker,
         runtimeMode,
@@ -116,6 +116,7 @@ function createRuntimeEngine(options: RuntimeEngineOptions = {}) {
         startWorker,
         stopWorker,
         restartWorker,
+        cancelReconnect,
     });
 
     runtimeEvents.on('log', (entry: any) => {

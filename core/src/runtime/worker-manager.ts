@@ -2,7 +2,13 @@ export {};
 const { createScheduler } = require('../services/scheduler');
 
 const DEFAULT_API_CALL_TIMEOUT_MS = 10000;
-// 断线后自动重连：仅当 code 未被判定失效（未收到 WS 400）时启用。
+// 被踢下线（其他位置登录）后：先静默等待固定时长，避开与另一处登录互相顶号，
+// 等待结束后再用当前保存的同一个 code 重连固定次数。
+const KICKOUT_RECONNECT_WAIT_MS = 5 * 60 * 1000;
+const KICKOUT_RECONNECT_ATTEMPTS = 2;
+// 最后一次尝试后的判定余量：给 worker 时间连上并回传状态，再收尾。
+const KICKOUT_RECONNECT_FINALIZE_MS = 30000;
+// 普通断线（非 400）自动重连：仅当 code 未被判定失效（未收到 WS 400）时启用。
 // 窗口内复用账号当前保存的同一个 code 周期性拉起 worker，不把 code 当一次性消耗。
 const RECONNECT_WINDOW_MS = 3 * 60 * 1000;
 const RECONNECT_FIRST_DELAY_MS = 3000;
@@ -66,8 +72,20 @@ function createWorkerManager(options: WorkerManagerOptions) {
     } = options;
     const managerScheduler = createScheduler('worker_manager');
 
-    // 断线重连窗口：key=accountId，记录到期时间。收到 WS 400（code 失效）时清除并不再重连。
-    const reconnectWindows = new Map<string, { until: number; reason: string }>();
+    // 重连计划：key=accountId。收到 WS 400（code 失效）时清除并不再重连。
+    // kickout：被其他位置顶下线，先等待 waitUntil 再用同一个 code 重连 attemptsLeft 次；
+    // disconnect：普通断线，在 until 之前按间隔快速重连。
+    type ReconnectPlan = {
+        mode: 'kickout' | 'disconnect';
+        reason: string;
+        // kickout：等待期结束时间（到达后才开始重连）；disconnect 不使用
+        waitUntil?: number;
+        // kickout：整体收尾时间（等待期 + 最后一次尝试的判定余量）；disconnect：重试窗口截止时间
+        until: number;
+        // kickout：剩余重连次数；disconnect 不使用
+        attemptsLeft: number;
+    };
+    const reconnectWindows = new Map<string, ReconnectPlan>();
     const useThreadRuntime = runtimeMode === 'thread' && !(processRef as any).pkg && typeof WorkerThread === 'function';
 
     function createThreadWorker(account: any): any {
@@ -110,9 +128,12 @@ function createWorkerManager(options: WorkerManagerOptions) {
         return createForkWorker(account);
     }
 
-    function startWorker(account: any): boolean {
+    // options.keepReconnectPlan：自动重连自己拉起 worker 时保留计划；
+    // 其余入口（用户手动启动、手动重启、开机自启）视为人工干预，立即取消等待中的重连计划。
+    function startWorker(account: any, options: { keepReconnectPlan?: boolean } = {}): boolean {
         if (!account || !account.id) return false;
         if (workers[account.id]) return false;
+        if (!options.keepReconnectPlan) cancelReconnectPlan(account.id, account.name, '已手动启动');
 
         log('系统', `正在启动账号: ${account.name}`, { accountId: String(account.id), accountName: account.name });
 
@@ -211,10 +232,23 @@ function createWorkerManager(options: WorkerManagerOptions) {
         });
     }
 
-    // 清除某账号的重连窗口与重试定时器。
+    // 清除某账号的重连计划与重试定时器。
     function clearReconnectWindow(accountId: string): void {
         reconnectWindows.delete(accountId);
         managerScheduler.clear(`auto_reconnect_${accountId}`);
+    }
+
+    // 手动干预（启动/停止/重启）时取消等待中的重连计划；返回是否确实取消了计划。
+    function cancelReconnectPlan(accountId: string, accountName: string, trigger: string): boolean {
+        const plan = reconnectWindows.get(accountId);
+        if (!plan) return false;
+        clearReconnectWindow(accountId);
+        const label = plan.mode === 'kickout' ? '被踢下线后的等待重连' : '自动重连窗口';
+        log('系统', `账号 ${accountName} ${trigger}，已取消${label}`, {
+            accountId: String(accountId), accountName, mode: plan.mode, reason: plan.reason,
+        });
+        addAccountLog('reconnect_cancelled', `账号 ${accountName} ${trigger}，已取消自动重连`, accountId, accountName, { mode: plan.mode });
+        return true;
     }
 
     // 判定 code 是否已失效：只有服务端明确给的 WS 400 才是可靠依据。
@@ -238,17 +272,98 @@ function createWorkerManager(options: WorkerManagerOptions) {
         }
     }
 
-    // 开启重连窗口：code 状态未知（kickout / 非 400 断线）时，窗口内复用当前 code 自动重连。
+    // 开启普通断线重连窗口（非挤号）：窗口内复用当前 code 按间隔重连。
     function beginReconnectWindow(accountId: string, accountName: string, reason: string): void {
         const now = Date.now();
         const existing = reconnectWindows.get(accountId);
-        if (existing && existing.until > now) return; // 已在窗口内，沿用截止时间，避免反复重置
-        reconnectWindows.set(accountId, { until: now + RECONNECT_WINDOW_MS, reason });
+        if (existing && existing.until > now) return; // 已有计划在跑，沿用截止时间，避免反复重置
+        reconnectWindows.set(accountId, { mode: 'disconnect', until: now + RECONNECT_WINDOW_MS, reason, attemptsLeft: 0 });
         log('系统', `账号 ${accountName} 进入 3 分钟自动重连窗口（reason=${reason}），窗口内复用当前 Code 尝试重连`, {
             accountId: String(accountId), accountName, reason,
         });
         addAccountLog('reconnect_window', `账号 ${accountName} 断线，进入 3 分钟自动重连窗口`, accountId, accountName, { reason });
         scheduleReconnectAttempt(accountId, RECONNECT_FIRST_DELAY_MS);
+    }
+
+    // 挤号重连计划：其他位置登录顶下线后，先静默等待固定时长，
+    // 再用账号当前保存的同一个 code 重连固定次数，避免与原登录处反复互踢。
+    function beginKickoutReconnect(accountId: string, accountName: string, reason: string): void {
+        const existing = reconnectWindows.get(accountId);
+        if (existing && existing.mode === 'kickout' && existing.until > Date.now()) {
+            // 已在等待期内，沿用原计划，避免反复被踢时不断重置等待时间。
+            return;
+        }
+        clearReconnectWindow(accountId);
+        const now = Date.now();
+        const waitUntil = now + KICKOUT_RECONNECT_WAIT_MS;
+        reconnectWindows.set(accountId, {
+            mode: 'kickout',
+            reason,
+            waitUntil,
+            until: waitUntil + KICKOUT_RECONNECT_FINALIZE_MS,
+            attemptsLeft: KICKOUT_RECONNECT_ATTEMPTS,
+        });
+        const waitMinutes = Math.round(KICKOUT_RECONNECT_WAIT_MS / 60000);
+        log('系统', `账号 ${accountName} 被踢下线，进入 ${waitMinutes} 分钟等待（不立即重连），等待结束后复用当前 Code 重连 ${KICKOUT_RECONNECT_ATTEMPTS} 次`, {
+            accountId: String(accountId), accountName, reason,
+        });
+        addAccountLog('kickout_wait', `账号 ${accountName} 被踢下线，等待 ${waitMinutes} 分钟后用当前 Code 重连 ${KICKOUT_RECONNECT_ATTEMPTS} 次`, accountId, accountName, { reason });
+        scheduleKickoutAttempt(accountId, KICKOUT_RECONNECT_WAIT_MS);
+    }
+
+    // 挤号计划的一次检查：等待期内不发起重连；到点后按剩余次数拉起 worker。
+    function scheduleKickoutAttempt(accountId: string, delayMs: number): void {
+        managerScheduler.setTimeoutTask(`auto_reconnect_${accountId}`, delayMs, () => {
+            try {
+                const plan = reconnectWindows.get(accountId);
+                if (!plan || plan.mode !== 'kickout') return;
+                const acc = typeof getAccountById === 'function' ? getAccountById(accountId) : null;
+                const name = acc?.name || accountId;
+
+                const now = Date.now();
+                // 定时器被提前触发（时钟漂移、调度器重排）时，按剩余等待时间重新排队，确保足额等满。
+                const waitUntil = Number(plan.waitUntil) || 0;
+                if (now < waitUntil) {
+                    scheduleKickoutAttempt(accountId, waitUntil - now);
+                    return;
+                }
+
+                if (now > plan.until) {
+                    clearReconnectWindow(accountId);
+                    log('系统', `账号 ${name} 被踢下线后的自动重连已结束，请手动启动或重新扫码`, { accountId: String(accountId), accountName: name });
+                    addAccountLog('reconnect_timeout', `账号 ${name} 自动重连 ${KICKOUT_RECONNECT_ATTEMPTS} 次未成功，请手动启动或重新扫码`, accountId, name);
+                    return;
+                }
+
+                if (plan.attemptsLeft <= 0) {
+                    // 次数已用完，留在计划里等收尾时间到达后再清理。
+                    scheduleKickoutAttempt(accountId, RECONNECT_RETRY_MS);
+                    return;
+                }
+
+                // 已有存活 worker（外部已拉起或上次尝试仍在连接）则不重复启动，等状态回传。
+                if (workers[accountId]) {
+                    scheduleKickoutAttempt(accountId, RECONNECT_RETRY_MS);
+                    return;
+                }
+
+                if (!acc || !acc.id) {
+                    clearReconnectWindow(accountId);
+                    return;
+                }
+
+                plan.attemptsLeft -= 1;
+                const attemptNo = KICKOUT_RECONNECT_ATTEMPTS - plan.attemptsLeft;
+                log('系统', `账号 ${name} 等待结束，第 ${attemptNo}/${KICKOUT_RECONNECT_ATTEMPTS} 次自动重连（复用当前 Code）`, {
+                    accountId: String(accountId), accountName: name, reason: plan.reason,
+                });
+                addAccountLog('kickout_reconnect', `账号 ${name} 第 ${attemptNo}/${KICKOUT_RECONNECT_ATTEMPTS} 次自动重连（复用当前 Code）`, accountId, name, { reason: plan.reason });
+                startWorker(acc, { keepReconnectPlan: true });
+                scheduleKickoutAttempt(accountId, RECONNECT_RETRY_MS);
+            } catch {
+                // ignore kickout reconnect scheduling errors
+            }
+        });
     }
 
     // 安排一次重连尝试。
@@ -465,16 +580,16 @@ function createWorkerManager(options: WorkerManagerOptions) {
             const reason = msg.reason || '未知';
             const reasonCode = Number(msg.reasonCode) || 0;
             const diagnostics = msg.diagnostics || null;
-            log('系统', `账号 ${worker.name} 被踢下线，进入 3 分钟自动重连窗口（窗口内复用当前 Code）`, { accountId: String(accountId), accountName: worker.name, reasonCode, diagnostics });
+            log('系统', `账号 ${worker.name} 被踢下线，进入 ${Math.round(KICKOUT_RECONNECT_WAIT_MS / 60000)} 分钟等待（等待结束后复用当前 Code 重连 ${KICKOUT_RECONNECT_ATTEMPTS} 次）`, { accountId: String(accountId), accountName: worker.name, reasonCode, diagnostics });
             triggerOfflineReminder({
                 accountId,
                 accountName: worker.name,
                 reason: `kickout:${reason}`,
                 offlineMs: 0,
             });
-            addAccountLog('kickout_reconnect', `账号 ${worker.name} 被踢下线，进入 3 分钟自动重连窗口`, accountId, worker.name, { reason, reasonCode, diagnostics });
+            addAccountLog('kickout_wait', `账号 ${worker.name} 被踢下线，等待 ${Math.round(KICKOUT_RECONNECT_WAIT_MS / 60000)} 分钟后用当前 Code 重连 ${KICKOUT_RECONNECT_ATTEMPTS} 次`, accountId, worker.name, { reason, reasonCode, diagnostics });
             stopWorker(accountId);
-            beginReconnectWindow(accountId, worker.name, `kickout:${reason}`);
+            beginKickoutReconnect(accountId, worker.name, `kickout:${reason}`);
         } else if (msg.type === 'account_disconnected') {
             if (worker.terminalHandled) return;
             worker.terminalHandled = true;
@@ -515,7 +630,9 @@ function createWorkerManager(options: WorkerManagerOptions) {
             stopWorker(accountId);
             // WS 400 已在 ws_error 分支判定 Code 失效并停止重连；其他断线 Code 状态未知，进入重连窗口。
             const codeExpired = code === 400 || source === 'ws_error' || Number(worker.wsError?.code) === 400;
-            if (!codeExpired) {
+            // 挤号计划进行中（例如等待期内的探测失败）不改成普通断线窗口，保留原有等待与次数。
+            const kickoutPlanActive = reconnectWindows.get(accountId)?.mode === 'kickout';
+            if (!codeExpired && !kickoutPlanActive) {
                 beginReconnectWindow(accountId, worker.name, `disconnect:${source}:${phase}:${code}`);
             }
         } else if (msg.type === 'api_response') {
@@ -611,6 +728,8 @@ function createWorkerManager(options: WorkerManagerOptions) {
         stopWorker,
         restartWorker,
         callWorkerApi,
+        // 手动停止账号时一并取消等待中的自动重连，避免停止后又被定时任务拉起。
+        cancelReconnect: (accountId: string) => cancelReconnectPlan(accountId, String(accountId), '已手动停止'),
     };
 }
 
