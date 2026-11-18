@@ -103,3 +103,27 @@ test('微信：没有长凭据时明确要求重新扫码', async () => {
     assert.equal(outcome.ok, false);
     assert.match(outcome.reason, /重新扫码/);
 });
+
+test('能力判定：微信只看长凭据，QQ 看账号级或全局 NapCat 地址', () => {
+    const { canRefreshAccountCode } = load({
+        '../models/store': { getLoginSettings: () => ({ napCatEndpoint: '' }) },
+        './qq-login/service': { refreshFarmCodeForAccount: async () => ({ code: 'X' }) },
+        '../utils/tsdk-runtime': { MINI_PROGRAM_APP_IDS: APP_IDS },
+    });
+    // 微信：本地 MMTLS 换码，不占 NapCat
+    assert.equal(canRefreshAccountCode({ platform: 'wx', loginBuffer: 'BUF' }), true);
+    assert.equal(canRefreshAccountCode({ platform: 'wx' }), false, '没有长凭据就换不了，需重扫');
+    // QQ：账号级地址优先
+    assert.equal(canRefreshAccountCode({ platform: 'qq', napCatBase: 'http://10.0.0.2:6099' }), true);
+    assert.equal(canRefreshAccountCode({ platform: 'qq' }), false, '既无账号级也无全局 NapCat 时判为不可换码');
+});
+
+test('能力判定：QQ 账号留空地址时回落到全局 NapCat', () => {
+    const { canRefreshAccountCode } = load({
+        '../models/store': { getLoginSettings: () => ({ napCatEndpoint: 'http://127.0.0.1:6099' }) },
+        './qq-login/service': { refreshFarmCodeForAccount: async () => ({ code: 'X' }) },
+        '../utils/tsdk-runtime': { MINI_PROGRAM_APP_IDS: APP_IDS },
+    });
+    assert.equal(canRefreshAccountCode({ platform: 'qq' }), true, '配置了全局 NapCat 就应视为可换码');
+    assert.equal(canRefreshAccountCode({ platform: 'qq', napCatBase: 'http://other:6099' }), true);
+});

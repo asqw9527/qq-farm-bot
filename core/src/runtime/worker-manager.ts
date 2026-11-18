@@ -47,6 +47,8 @@ interface WorkerManagerOptions {
     getAccountById?: (accountId: string) => any;
     // 挤号/400 后换取新 Code：微信走本地长凭据，QQ 走账号绑定的 NapCat（含 uin 比对）
     refreshAccountCode?: (account: any) => Promise<{ ok: boolean; code?: string; uin?: string; reason?: string; warn?: string }>;
+    // 这个账号是否有换码出口（微信长凭据 / 可用 NapCat）。缺省视为有，兼容旧调用方。
+    canRefreshAccountCode?: (account: any) => boolean;
 }
 
 function createWorkerManager(options: WorkerManagerOptions) {
@@ -72,6 +74,7 @@ function createWorkerManager(options: WorkerManagerOptions) {
         onWorkerLog,
         getAccountById,
         refreshAccountCode,
+        canRefreshAccountCode,
     } = options;
     const managerScheduler = createScheduler('worker_manager');
 
@@ -93,6 +96,34 @@ function createWorkerManager(options: WorkerManagerOptions) {
     // 不加标记的话用户在换码途中再点一次启动，会因为重连计划已被清空而
     // 直接拿旧 Code 同步启动，又撞一次 400。
     const codeRefreshing = new Set<string>();
+
+    // 该账号有没有换码出口（微信长凭据 / 可用 NapCat）。
+    // 两个场景的"未注入时默认值"不一样，别合并成一个：
+    // - 被踢：本来就只是"等 5 分钟复用旧 Code"，换码是增强，判不出来时保持旧行为（按有处理）；
+    // - WS 400：原本只有具备换码能力才重连，判不出来时沿用"换码函数存在即视为有"。
+    function accountCanRefreshOnKickout(account: any): boolean {
+        if (typeof canRefreshAccountCode === 'function') {
+            try {
+                return !!canRefreshAccountCode(account);
+            }
+            catch {
+                return true;
+            }
+        }
+        return true;
+    }
+
+    function accountCanRefreshOn400(account: any): boolean {
+        if (typeof canRefreshAccountCode === 'function') {
+            try {
+                return !!canRefreshAccountCode(account);
+            }
+            catch {
+                return false;
+            }
+        }
+        return typeof refreshAccountCode === 'function';
+    }
     const useThreadRuntime = runtimeMode === 'thread' && !(processRef as any).pkg && typeof WorkerThread === 'function';
 
     function createThreadWorker(account: any): any {
@@ -694,7 +725,8 @@ function createWorkerManager(options: WorkerManagerOptions) {
                 // 换码不可用或今天的换码重连已用尽，则照旧停止并提示人工处理。
                 const hadPlan = reconnectWindows.has(accountId);
                 markCodeExpired(accountId, 'ws_400');
-                const canRefresh = typeof refreshAccountCode === 'function';
+                const expiredAccount = typeof getAccountById === 'function' ? getAccountById(accountId) : null;
+                const canRefresh = accountCanRefreshOn400(expiredAccount);
                 if (canRefresh && !hadPlan && recordCodeExpiredRetry(accountId)) {
                     log('系统', `账号 ${worker.name} Code 已失效（WS 400），已安排换取新 Code 后重连`, {
                         accountId: String(accountId), accountName: worker.name,
@@ -708,9 +740,15 @@ function createWorkerManager(options: WorkerManagerOptions) {
                     stopWorker(accountId);
                     beginKickoutReconnect(accountId, worker.name, 'kickout:ws_400');
                 } else {
+                    const detail = canRefresh
+                        ? `今天的换码重连次数已用尽（上限 ${CODE_EXPIRED_RETRY_LIMIT} 次）`
+                        : '该账号没有可用的换码出口（微信未存长凭据 / QQ 未配 NapCat）';
+                    log('错误', `账号 ${worker.name} Code 已失效（WS 400）：${detail}，停止自动重连，请重新扫码`, {
+                        accountId: String(accountId), accountName: worker.name,
+                    });
                     addAccountLog(
                         'ws_400',
-                        `账号 ${worker.name} 登录失效（Code 已到期），停止自动重连，请更新 Code`,
+                        `账号 ${worker.name} 登录失效（Code 已到期）：${detail}，停止自动重连，请重新扫码`,
                         accountId,
                         worker.name,
                     );
@@ -722,13 +760,28 @@ function createWorkerManager(options: WorkerManagerOptions) {
             const reason = msg.reason || '未知';
             const reasonCode = Number(msg.reasonCode) || 0;
             const diagnostics = msg.diagnostics || null;
-            log('系统', `账号 ${worker.name} 被踢下线，进入 ${Math.round(KICKOUT_RECONNECT_WAIT_MS / 60000)} 分钟等待（等待结束后换取新 Code 重连 ${KICKOUT_RECONNECT_ATTEMPTS} 次）`, { accountId: String(accountId), accountName: worker.name, reasonCode, diagnostics });
             triggerOfflineReminder({
                 accountId,
                 accountName: worker.name,
                 reason: `kickout:${reason}`,
                 offlineMs: 0,
             });
+
+            // 一台机器只跑得起一个 NapCat 时，只有 NapCat 上正登着的那个 QQ 能自动换码。
+            // 没有换码出口的账号如果还按 5 分钟等待 + 复用旧 Code 重连，纯属白撞 400，
+            // 所以这里直接判死并明确要求重新扫码，把"等 5 分钟才发现没用"变成"立刻说清楚"。
+            const kickedAccount = typeof getAccountById === 'function' ? getAccountById(accountId) : null;
+            if (!accountCanRefreshOnKickout(kickedAccount)) {
+                markCodeExpired(accountId, 'kickout:no_code_source');
+                log('错误', `账号 ${worker.name} 被踢下线，且没有可用的换码出口（微信未存长凭据 / QQ 未配 NapCat），已停止自动重连，请重新扫码`, {
+                    accountId: String(accountId), accountName: worker.name, reasonCode, diagnostics,
+                });
+                addAccountLog('kickout_need_new_code', `账号 ${worker.name} 被踢下线，无法自动换取新 Code（没有可用的 NapCat 或微信长凭据），需要重新扫码`, accountId, worker.name, { reason, reasonCode, diagnostics });
+                stopWorker(accountId);
+                return;
+            }
+
+            log('系统', `账号 ${worker.name} 被踢下线，进入 ${Math.round(KICKOUT_RECONNECT_WAIT_MS / 60000)} 分钟等待（等待结束后换取新 Code 重连 ${KICKOUT_RECONNECT_ATTEMPTS} 次）`, { accountId: String(accountId), accountName: worker.name, reasonCode, diagnostics });
             addAccountLog('kickout_wait', `账号 ${worker.name} 被踢下线，等待 ${Math.round(KICKOUT_RECONNECT_WAIT_MS / 60000)} 分钟后换取新 Code 重连 ${KICKOUT_RECONNECT_ATTEMPTS} 次`, accountId, worker.name, { reason, reasonCode, diagnostics });
             stopWorker(accountId);
             beginKickoutReconnect(accountId, worker.name, `kickout:${reason}`);

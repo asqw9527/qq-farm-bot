@@ -404,3 +404,29 @@ test('手动启动换码期间重复点击启动：只换一次码、只启动�
     assert.equal(starts.length, before + 1, '换码完成后只启动一次');
     assert.equal(starts.at(-1).config.code, 'CODE-NEW', '应使用换到的新 Code');
 });
+
+test('被踢但没有换码出口：不进入 5 分钟等待，直接要求重新扫码', () => {
+    const clock = makeClock();
+    const h = buildManager({
+        clock,
+        options: { canRefreshAccountCode: () => false },
+    });
+    const worker = h.attachWorker();
+
+    emitMessage(h, worker, { type: 'account_kicked', reason: '已在其他终端登录', reasonCode: 1 });
+
+    assert.equal(h.sched.tasks.has('auto_reconnect_acc-1'), false, '没有换码出口不应安排等待重连');
+    assert.ok(h.accountLogs.some(l => l.action === 'kickout_need_new_code'), '应明确记录需要重新扫码');
+    assert.equal(h.accountLogs.some(l => l.action === 'kickout_wait'), false, '不应记录等待 5 分钟');
+});
+
+test('WS 400 且没有换码出口：不安排重连，日志说明是没有 NapCat 而不是次数用尽', () => {
+    const h = buildManager({ options: { canRefreshAccountCode: () => false } });
+    const worker = h.attachWorker();
+
+    emitMessage(h, worker, { type: 'ws_error', code: 400, message: 'Unexpected server response: 400' });
+
+    assert.equal(h.sched.tasks.has('auto_reconnect_acc-1'), false, '无换码出口不应安排重连');
+    const entry = h.accountLogs.find(l => l.action === 'ws_400');
+    assert.match(entry.msg, /没有可用的换码出口/);
+});

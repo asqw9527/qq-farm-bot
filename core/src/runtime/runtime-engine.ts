@@ -9,7 +9,7 @@ const { createDataProvider } = require('./data-provider');
 const { createReloginReminderService } = require('./relogin-reminder');
 const { createRuntimeState } = require('./runtime-state');
 const { createWorkerManager } = require('./worker-manager');
-const { refreshAccountCode } = require('../services/account-code-refresh');
+const { refreshAccountCode, canRefreshAccountCode } = require('../services/account-code-refresh');
 
 const OPERATION_KEYS = ['harvest', 'farming', 'fertilize', 'plant', 'steal', 'helpFarming', 'taskClaim', 'sell', 'upgrade'];
 
@@ -91,6 +91,7 @@ function createRuntimeEngine(options: RuntimeEngineOptions = {}) {
             return list.find((acc: any) => String(acc && acc.id) === String(accountId)) || null;
         },
         refreshAccountCode,
+        canRefreshAccountCode,
         onStatusSync: (accountId: string, status: any, accountName?: string) => {
             runtimeEvents.emit('status', { accountId, status, accountName });
             if (onStatusSync) onStatusSync(accountId, status, accountName);

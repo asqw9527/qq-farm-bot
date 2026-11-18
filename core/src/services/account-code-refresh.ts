@@ -1,6 +1,7 @@
 import { getNativeWxLoginCode } from './wx-login/native-protocol';
 
 const { refreshFarmCodeForAccount } = require('./qq-login/service');
+const store = require('../models/store');
 // tsdk-runtime 是 CJS 导出，用 require 取官方小程序 appid 常量，避免硬编码漂移。
 const { MINI_PROGRAM_APP_IDS } = require('../utils/tsdk-runtime');
 
@@ -12,8 +13,11 @@ const { MINI_PROGRAM_APP_IDS } = require('../utils/tsdk-runtime');
  *
  * 两个平台的换码能力不对称：
  * - 微信：本地 MMTLS 协议，用扫码时保存的 loginBuffer 直接换，不依赖任何外部服务。
+ *   也就是说微信账号不占 NapCat，想挂多少个都行。
  * - QQ：必须借助账号绑定的 NapCat + qq-farm-code 插件；NapCat 单实例只能登一个号，
  *   所以必须用返回的 uin 与账号 uin 比对，不一致就放弃，绝不能写错账号。
+ *   一台机器只跑得起一个 NapCat 时，实际只有「NapCat 上正登着的那个 QQ」能自动换码，
+ *   其余 QQ 账号换不了——用 canRefreshAccountCode 提前判定，别让它们白等 5 分钟再撞 400。
  */
 
 export interface CodeRefreshOutcome {
@@ -27,6 +31,31 @@ export interface CodeRefreshOutcome {
 
 function normalizeUin(value: unknown): string {
     return String(value ?? '').trim();
+}
+
+function globalNapCatEndpoint(): string {
+    try {
+        const settings = store.getLoginSettings ? (store.getLoginSettings() || {}) : {};
+        return String(settings.napCatEndpoint || '').trim();
+    }
+    catch {
+        return '';
+    }
+}
+
+/**
+ * 这个账号到底有没有换码出口。
+ *
+ * 注意别用「函数存在」来判断能力——refreshAccountCode 永远存在，但账号可能
+ * 既没有微信长凭据、也没有可用的 NapCat 地址，这时候挤号后的等待和重连纯属浪费，
+ * 只会多撞几次 400。判定必须落到账号本身。
+ */
+export function canRefreshAccountCode(account: any): boolean {
+    const platform = String(account?.platform || 'qq').trim().toLowerCase();
+    if (platform === 'wx')
+        return !!String(account?.loginBuffer || '').trim();
+    // QQ：账号级地址优先，留空才有资格回落全局
+    return !!String(account?.napCatBase || '').trim() || !!globalNapCatEndpoint();
 }
 
 export async function refreshAccountCode(account: any): Promise<CodeRefreshOutcome> {
