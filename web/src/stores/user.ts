@@ -3,22 +3,28 @@ import { defineStore } from 'pinia'
 import { computed } from 'vue'
 import api, { getApiErrorMessage } from '@/api'
 
+export type UserRole = 'admin' | 'user'
+
 export interface AdminInfo {
   username: string
-  role: 'admin'
+  role: UserRole
   avatar?: string
   mustChangePassword?: boolean
+  accountLimit?: number
+  expiresAt?: number
+  isPermanent?: boolean
+  cardCode?: string
 }
 
 export interface LoginResult {
   ok: boolean
   error?: string
-  errorType?: 'rate_limit' | 'locked' | 'invalid_credentials'
+  errorType?: 'rate_limit' | 'locked' | 'invalid_credentials' | 'expired'
   remainingMs?: number
   data?: {
     token: string
-    role: 'admin'
-    user: { username: string }
+    role: UserRole
+    user: { username: string; role?: UserRole }
     mustChangePassword?: boolean
   }
 }
@@ -29,17 +35,33 @@ export const useUserStore = defineStore('user', () => {
   const isLoggedIn = computed(() => !!token.value)
   const username = computed(() => userInfo.value?.username || '')
   const avatar = computed(() => userInfo.value?.avatar || '')
+  const role = computed<UserRole>(() => userInfo.value?.role || 'admin')
+  const isAdmin = computed(() => role.value === 'admin' || role.value === 'super_admin')
 
-  async function login(username: string, password: string): Promise<LoginResult> {
+  function applyUser(data: any) {
+    if (!data) return
+    userInfo.value = {
+      username: data.username || '',
+      role: data.role === 'user' ? 'user' : 'admin',
+      avatar: data.avatar,
+      mustChangePassword: data.mustChangePassword,
+      accountLimit: data.accountLimit,
+      expiresAt: data.expiresAt,
+      isPermanent: data.isPermanent,
+      cardCode: data.cardCode,
+    }
+  }
+
+  async function login(loginName: string, password: string): Promise<LoginResult> {
     try {
-      const res = await api.post('/api/login', { username, password })
+      const res = await api.post('/api/login', { username: loginName, password })
       if (res.data.ok) {
         token.value = res.data.data.token
-        userInfo.value = {
-          username: res.data.data.user.username,
-          role: 'admin',
+        applyUser({
+          ...(res.data.data.user || {}),
+          role: res.data.data.role,
           mustChangePassword: res.data.data.mustChangePassword,
-        }
+        })
       }
       return res.data
     }
@@ -48,6 +70,49 @@ export const useUserStore = defineStore('user', () => {
       return data
         ? { ok: false, error: getApiErrorMessage(data, '网络错误'), errorType: data.errorType, remainingMs: data.remainingMs }
         : { ok: false, error: getApiErrorMessage(error, '网络错误') }
+    }
+  }
+
+  async function register(loginName: string, password: string, cardCode: string) {
+    try {
+      const res = await api.post('/api/users/register', { username: loginName, password, cardCode })
+      return res.data
+    }
+    catch (error: any) {
+      return error.response?.data || { ok: false, error: getApiErrorMessage(error, '网络错误') }
+    }
+  }
+
+  async function claimCard(loginName?: string) {
+    try {
+      const res = await api.post('/api/users/claim-card', {
+        username: loginName,
+        userAgent: typeof navigator !== 'undefined' ? navigator.userAgent : 'web',
+      })
+      return res.data
+    }
+    catch (error: any) {
+      return error.response?.data || { ok: false, error: getApiErrorMessage(error, '网络错误') }
+    }
+  }
+
+  async function fetchCardClaimStatus() {
+    try {
+      const res = await api.get('/api/users/card-claim-status')
+      return res.data
+    }
+    catch {
+      return { ok: false }
+    }
+  }
+
+  async function renew(cardCode: string) {
+    try {
+      const res = await api.post('/api/users/renew', { cardCode })
+      return res.data
+    }
+    catch (error: any) {
+      return error.response?.data || { ok: false, error: getApiErrorMessage(error, '网络错误') }
     }
   }
 
@@ -64,8 +129,8 @@ export const useUserStore = defineStore('user', () => {
   async function fetchUserInfo() {
     try {
       const res = await api.get('/api/user/me')
-      if (res.data.ok)
-        userInfo.value = res.data.data
+      if (res.data.ok && res.data.data)
+        applyUser(res.data.data)
       return res.data
     }
     catch {
@@ -84,9 +149,16 @@ export const useUserStore = defineStore('user', () => {
     isLoggedIn,
     username,
     avatar,
+    role,
+    isAdmin,
     login,
+    register,
+    claimCard,
+    fetchCardClaimStatus,
+    renew,
     logout,
     fetchUserInfo,
     changePassword,
+    applyUser,
   }
 })

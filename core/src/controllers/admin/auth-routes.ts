@@ -7,6 +7,7 @@ const { getRuntimeConfig } = require('../../config/config');
 const { getSchedulerRegistrySnapshot } = require('../../services/scheduler');
 const { createModuleLogger } = require('../../services/logger');
 const adminStore = require('../../models/admin-store');
+const userStore = require('../../models/user-store');
 
 const {
     getClientIp,
@@ -42,13 +43,21 @@ function mountAuthRoutes(app: Application, ctx: AdminContext): void {
 
         const token = issueToken();
         ctx.tokens.add(token);
-        adminLogger.info('超级管理员登录成功', { username: result.username, ip: clientIp });
+        const authResult = {
+            username: result.username,
+            role: result.role || 'admin',
+            accountLimit: result.accountLimit,
+            expiresAt: result.expiresAt,
+            isPermanent: result.isPermanent,
+        };
+        if (ctx.tokenUsers) ctx.tokenUsers.set(token, authResult);
+        adminLogger.info('用户登录成功', { username: result.username, role: authResult.role, ip: clientIp });
         return res.json({
             ok: true,
             data: {
                 token,
-                role: 'admin',
-                user: { username: result.username },
+                role: authResult.role,
+                user: { username: result.username, role: authResult.role },
                 mustChangePassword: result.mustChangePassword === true,
             },
         });
@@ -59,13 +68,26 @@ function mountAuthRoutes(app: Application, ctx: AdminContext): void {
         if (!oldPassword || !newPassword) {
             return res.status(400).json({ ok: false, error: '请提供原密码和新密码' });
         }
-        const result = adminStore.changePassword(String(oldPassword), String(newPassword));
-        if (result.ok) ctx.tokens.clear();
-        return res.json(result);
+        const username = String((req as any).currentUser?.username || 'admin');
+        const result = userStore.changeUserPassword(username, String(oldPassword), String(newPassword));
+        if (result.ok) {
+            ctx.tokens.clear();
+            if (ctx.tokenUsers) ctx.tokenUsers.clear();
+        }
+        return res.json({ ok: result.ok, error: result.error, message: result.ok ? '密码修改成功' : undefined });
     });
 
+    // 免鉴权公开路径：登录、版本、注册/领卡/找回 等用户自助入口
+    const publicApiPaths = new Set([
+        '/login',
+        '/game-version',
+        '/users/login',
+        '/users/register',
+        '/users/claim-card',
+        '/users/card-claim-status',
+    ]);
     app.use('/api', (req: Request, res: Response, next: any) => {
-        if (req.path === '/login' || req.path === '/game-version') return next();
+        if (publicApiPaths.has(req.path)) return next();
         return authRequired(req, res, next);
     });
 
@@ -104,7 +126,11 @@ function mountAuthRoutes(app: Application, ctx: AdminContext): void {
 
     app.post('/api/logout', (req: Request, res: Response) => {
         const token = (req as any).adminToken;
-        if (token) ctx.tokens.delete(token);
+        if (token) {
+            ctx.tokens.delete(token);
+            if (ctx.tokenUsers) ctx.tokenUsers.delete(token);
+            userStore.revokeUserToken(token);
+        }
         if (ctx.io && token) {
             for (const socket of ctx.io.sockets.sockets.values()) {
                 if (String((socket.data as any).adminToken || '') === String(token)) socket.disconnect(true);
@@ -113,7 +139,11 @@ function mountAuthRoutes(app: Application, ctx: AdminContext): void {
         res.json({ ok: true });
     });
 
-    app.get('/api/user/me', (_req: Request, res: Response) => {
+    app.get('/api/user/me', (req: Request, res: Response) => {
+        const current = (req as any).currentUser;
+        if (current) {
+            return res.json({ ok: true, data: current });
+        }
         res.json({ ok: true, data: adminStore.getAdminInfo() });
     });
 }

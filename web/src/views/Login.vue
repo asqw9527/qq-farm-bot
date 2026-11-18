@@ -12,13 +12,24 @@ const userStore = useUserStore()
 const appVersion = __APP_VERSION__
 const gameVersion = ref('')
 const wxGameVersion = ref('')
+type AuthMode = 'login' | 'register' | 'claim'
+const authMode = ref<AuthMode>('login')
 const username = ref('')
 const password = ref('')
+const cardCode = ref('')
+const claimResult = ref('')
 const error = ref('')
 const success = ref('')
 const loading = ref(false)
 const lockoutRemaining = ref(0)
 const rateLimitRemaining = ref(0)
+
+function switchMode(mode: AuthMode) {
+  authMode.value = mode
+  error.value = ''
+  success.value = ''
+  claimResult.value = ''
+}
 
 const usernameValid = computed(() => {
   const name = username.value
@@ -58,6 +69,31 @@ async function handleSubmit() {
   success.value = ''
 
   try {
+    if (authMode.value === 'register') {
+      const result = await userStore.register(username.value, password.value, cardCode.value)
+      if (result.ok) {
+        success.value = '注册成功，请使用该账号登录'
+        authMode.value = 'login'
+        password.value = ''
+        cardCode.value = ''
+      }
+      else {
+        error.value = result.error || '注册失败'
+      }
+      return
+    }
+    if (authMode.value === 'claim') {
+      const result = await userStore.claimCard(username.value)
+      if (result.ok) {
+        claimResult.value = result.cardCode || '领取成功'
+        success.value = '卡密领取成功，请复制并用于注册'
+      }
+      else {
+        error.value = result.error || '领取失败'
+      }
+      return
+    }
+
     const result = await userStore.login(username.value, password.value)
     if (result.ok) {
       if (result.data?.mustChangePassword)
@@ -101,6 +137,17 @@ async function handleSubmit() {
   }
 }
 
+async function copyClaimResult() {
+  if (!claimResult.value) return
+  try {
+    await navigator.clipboard.writeText(claimResult.value)
+    success.value = '卡密已复制到剪贴板'
+  }
+  catch {
+    success.value = `请手动复制卡密：${claimResult.value}`
+  }
+}
+
 async function fetchGameVersion() {
   try {
     const res = await api.get('/api/game-version')
@@ -127,10 +174,16 @@ onMounted(fetchGameVersion)
             QQ农场智能助手
           </h1>
           <p class="logo-subtitle">
-            超级管理员登录
+            QQ农场智能助手 · 账号登录
           </p>
         </div>
       </header>
+
+      <div class="mode-tabs">
+        <button type="button" :class="['mode-tab', { active: authMode === 'login' }]" @click="switchMode('login')">登录</button>
+        <button type="button" :class="['mode-tab', { active: authMode === 'register' }]" @click="switchMode('register')">注册</button>
+        <button type="button" :class="['mode-tab', { active: authMode === 'claim' }]" @click="switchMode('claim')">领取卡密</button>
+      </div>
 
       <form class="form-area" @submit.prevent="handleSubmit">
         <div class="form-group">
@@ -166,6 +219,28 @@ onMounted(fetchGameVersion)
           />
         </div>
 
+        <div v-if="authMode === 'register'" class="form-group">
+          <label class="form-label" for="cardCode">
+            <span class="i-carbon-ticket" />
+            卡密
+          </label>
+          <BaseInput
+            id="cardCode"
+            v-model="cardCode"
+            type="text"
+            placeholder="请输入时间卡密"
+            required
+          />
+        </div>
+
+        <div v-if="authMode === 'claim'" class="claim-tip">
+          首次使用可点击领取一张免费时间卡密（24 小时内仅限一次），领取后切换到「注册」。
+        </div>
+        <div v-if="claimResult" class="claim-code" @click="copyClaimResult">
+          <span>卡密：{{ claimResult }}</span>
+          <span class="claim-copy">点击复制</span>
+        </div>
+
         <div v-if="error" class="message error-message" role="alert">
           <span class="i-carbon-warning-alt" />
           <div>
@@ -181,8 +256,8 @@ onMounted(fetchGameVersion)
 
         <BaseButton type="submit" variant="primary" block :loading="loading" class="submit-btn">
           <span v-if="!loading" class="inline-flex items-center gap-2">
-            <span class="i-carbon-login" />
-            登录
+            <span :class="authMode === 'login' ? 'i-carbon-login' : authMode === 'register' ? 'i-carbon-user-multiple' : 'i-carbon-ticket'" />
+            {{ authMode === 'login' ? '登录' : authMode === 'register' ? '注册账号' : '领取卡密' }}
           </span>
         </BaseButton>
       </form>
@@ -193,7 +268,7 @@ onMounted(fetchGameVersion)
           <span v-if="gameVersion">QQ {{ gameVersion }}</span>
           <span v-if="wxGameVersion">微信 {{ wxGameVersion }}</span>
         </div>
-        <a href="https://github.com/liyangpengs/qq-farm-bot" target="_blank" rel="noopener noreferrer" class="github-link" aria-label="GitHub">
+        <a href="https://github.com/asqw9527/qq-farm-bot" target="_blank" rel="noopener noreferrer" class="github-link" aria-label="GitHub">
           <span class="i-carbon-logo-github" />
         </a>
       </footer>
@@ -377,6 +452,69 @@ onMounted(fetchGameVersion)
 .github-link:hover {
   color: var(--ui-primary);
   background: var(--ui-primary-soft);
+}
+
+.mode-tabs {
+  display: flex;
+  gap: 6px;
+  padding: 4px;
+  margin-bottom: 18px;
+  border-radius: 10px;
+  background: var(--ui-primary-soft);
+}
+
+.mode-tab {
+  flex: 1;
+  padding: 8px 6px;
+  border: none;
+  border-radius: 7px;
+  background: transparent;
+  color: var(--ui-muted);
+  font-size: 13px;
+  cursor: pointer;
+  transition: all 0.15s ease;
+}
+
+.mode-tab:hover {
+  color: var(--ui-primary);
+}
+
+.mode-tab.active {
+  background: var(--ui-surface-strong, #fff);
+  color: var(--ui-primary);
+  font-weight: 600;
+  box-shadow: 0 1px 3px rgba(0, 0, 0, 0.08);
+}
+
+.claim-tip {
+  padding: 10px 12px;
+  border-radius: 8px;
+  background: var(--ui-primary-soft);
+  color: var(--ui-muted);
+  font-size: 12px;
+  line-height: 1.6;
+}
+
+.claim-code {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  padding: 12px;
+  border: 1px dashed var(--ui-primary);
+  border-radius: 8px;
+  color: var(--ui-primary);
+  font-weight: 600;
+  letter-spacing: 1px;
+  cursor: pointer;
+  word-break: break-all;
+}
+
+.claim-copy {
+  flex-shrink: 0;
+  font-size: 12px;
+  font-weight: 400;
+  opacity: 0.7;
 }
 
 @media (max-width: 480px) {

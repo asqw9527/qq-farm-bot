@@ -4,10 +4,12 @@ export {};
 
 const crypto = require('node:crypto');
 const store = require('../../models/store');
+const userStore = require('../../models/user-store');
 const { normalizeAccountRef, resolveAccountId } = require('../../services/account-resolver');
 
 interface AuthenticatedRequest extends Request {
     adminToken?: string;
+    currentUser?: any;
 }
 
 function getClientIp(req: Request): string {
@@ -28,31 +30,61 @@ const issueToken = (): string => crypto.randomBytes(24).toString('hex');
 
 function createAuthRequired(ctx: AdminContext) {
     return (req: AuthenticatedRequest, res: Response, next: NextFunction): void => {
-        const token = String(req.headers['x-admin-token'] || '');
+        // 支持 x-admin-token（原前端）与 Authorization: Bearer（多用户前端）两种传递方式
+        let token = String(req.headers['x-admin-token'] || '').trim();
+        if (!token) {
+            const auth = String(req.headers['authorization'] || '').trim();
+            if (/^Bearer\s+/i.test(auth)) token = auth.replace(/^Bearer\s+/i, '').trim();
+        }
         if (!token || !ctx.tokens.has(token)) {
             res.status(401).json({ ok: false, error: 'Unauthorized' });
             return;
         }
         req.adminToken = token;
+        // 解析当前登录用户；兼容旧 token（无映射）按超级管理员处理
+        let currentUser = ctx.tokenUsers && ctx.tokenUsers.get(token);
+        if (!currentUser) {
+            const resolved = userStore.getAuthResultByToken(token);
+            if (resolved) currentUser = resolved;
+        }
+        if (!currentUser) currentUser = { username: 'admin', role: 'admin', accountLimit: -1 };
+        req.currentUser = currentUser;
         next();
     };
 }
 
-function getAccountList(ctx: AdminContext): any[] {
+function isAdminUser(req: AuthenticatedRequest): boolean {
+    const user = req.currentUser;
+    return !!user && (user.role === 'admin' || user.role === 'super_admin');
+}
+
+// 当前用户可见的账号列表：管理员可见全部，普通用户仅可见归属自己的账号（含未绑定旧账号）
+function getAccountList(ctx: AdminContext, req?: AuthenticatedRequest): any[] {
+    let accounts: any[];
     try {
         if (ctx.provider && typeof ctx.provider.getAccounts === 'function') {
             const data = ctx.provider.getAccounts();
-            if (Array.isArray(data?.accounts)) return data.accounts;
+            if (Array.isArray(data?.accounts)) accounts = data.accounts;
+            else accounts = [];
+        } else {
+            accounts = [];
         }
     } catch {
-        // Fall back to persistent storage.
+        const data = store.getAccounts ? store.getAccounts() : { accounts: [] };
+        accounts = Array.isArray(data.accounts) ? data.accounts : [];
     }
-    const data = store.getAccounts ? store.getAccounts() : { accounts: [] };
-    return Array.isArray(data.accounts) ? data.accounts : [];
+    if (req && req.currentUser && !isAdminUser(req)) {
+        const username = String(req.currentUser.username || '');
+        accounts = accounts.filter((a: any) => {
+            const owner = String(a.username || '');
+            return !owner || owner === username;
+        });
+    }
+    return accounts;
 }
 
-function getAccountIds(ctx: AdminContext): string[] {
-    return getAccountList(ctx).map((account: any) => String(account.id || '')).filter(Boolean);
+function getAccountIds(ctx: AdminContext, req?: AuthenticatedRequest): string[] {
+    return getAccountList(ctx, req).map((account: any) => String(account.id || '')).filter(Boolean);
 }
 
 const isSoftRuntimeError = (err: any): boolean => {
@@ -93,18 +125,18 @@ function handleApiError(res: Response, err: any): void {
     res.status(500).json(payload);
 }
 
-function resolveAccId(ctx: AdminContext, rawRef: any): string {
+function resolveAccId(ctx: AdminContext, rawRef: any, req?: AuthenticatedRequest): string {
     const input = normalizeAccountRef(rawRef);
     if (!input) return '';
     if (ctx.provider && typeof ctx.provider.resolveAccountId === 'function') {
         const resolvedByProvider = normalizeAccountRef(ctx.provider.resolveAccountId(input));
         if (resolvedByProvider) return resolvedByProvider;
     }
-    return resolveAccountId(getAccountList(ctx), input) || input;
+    return resolveAccountId(getAccountList(ctx, req), input) || input;
 }
 
-function getAccId(ctx: AdminContext, req: Request): string {
-    return resolveAccId(ctx, req.headers['x-account-id']);
+function getAccId(ctx: AdminContext, req: AuthenticatedRequest): string {
+    return resolveAccId(ctx, req.headers['x-account-id'], req);
 }
 
 function buildKnownFriendGidSettings(accountId: string): {
@@ -127,6 +159,7 @@ module.exports = {
     getClientIp,
     issueToken,
     createAuthRequired,
+    isAdminUser,
     getAccountList,
     getAccountIds,
     isSoftRuntimeError,

@@ -7,6 +7,7 @@ export {};
  */
 
 const store = require('../../models/store');
+const userStore = require('../../models/user-store');
 const { addOrUpdateAccount, deleteAccount } = store;
 const { findAccountByRef } = require('../../services/account-resolver');
 const { updateRuntimeConfig, getRuntimeConfig, getDefaultSystemConfig, getDevicePresets, getTimeZoneOptions } = require('../../config/config');
@@ -17,15 +18,20 @@ const {
     handleApiError,
     getAccountList,
     resolveAccId,
+    isAdminUser,
 } = require('./middleware');
 
 function mountAccountRoutes(app: Application, ctx: AdminContext): void {
 
-    // API: 账号管理
+    // API: 账号管理（按当前用户归属过滤）
     app.get('/api/accounts', (req: Request, res: Response) => {
         try {
+            const visible = getAccountList(ctx, req as any);
             const data = ctx.provider.getAccounts();
-            res.json({ ok: true, data });
+            res.json({
+                ok: true,
+                data: { ...(data || {}), accounts: visible },
+            });
         } catch (e: any) {
             handleApiError(res, e);
         }
@@ -69,7 +75,12 @@ function mountAccountRoutes(app: Application, ctx: AdminContext): void {
             if (!requestedName) {
                 return res.status(400).json({ ok: false, error: '账号备注不能为空' });
             }
-            const visibleAccounts = getAccountList(ctx);
+            const currentUser = (req as any).currentUser || { username: 'admin', role: 'admin', accountLimit: -1 };
+            const currentUsername = String(currentUser.username || 'admin');
+            const adminMode = currentUser.role === 'admin' || currentUser.role === 'super_admin';
+            const allAccountsRaw = ctx.provider.getAccounts ? ctx.provider.getAccounts() : { accounts: [] };
+            const allAccounts: any[] = Array.isArray(allAccountsRaw?.accounts) ? allAccountsRaw.accounts : [];
+            const visibleAccounts = getAccountList(ctx, req as any);
             const remarkMatchedAccount = !body.id && requestedName
                 ? visibleAccounts.find((account: any) => String(account.name || '').trim() === requestedName)
                 : null;
@@ -77,8 +88,21 @@ function mountAccountRoutes(app: Application, ctx: AdminContext): void {
             const updateRef = body.id || (remarkMatchedAccount && remarkMatchedAccount.id) || '';
             const isUpdate = !!updateRef;
 
-            const resolvedUpdateId = isUpdate ? resolveAccId(ctx, updateRef) : '';
+            const resolvedUpdateId = isUpdate ? resolveAccId(ctx, updateRef, req as any) : '';
             const payload = isUpdate ? { ...body, id: resolvedUpdateId || String(updateRef) } : body;
+
+            // 归属校验：普通用户不能操作归属他人的账号；新增时校验账号上限并绑定归属
+            if (isUpdate && !adminMode) {
+                const target = allAccounts.find((a: any) => String(a.id) === String(payload.id));
+                if (target && String(target.username || '') && String(target.username || '') !== currentUsername) {
+                    return res.status(403).json({ ok: false, error: '该农场账号已绑定其他用户' });
+                }
+            }
+            if (!isUpdate) {
+                const quota = adminMode ? { ok: true } : userStore.ensureAccountQuota(currentUsername, allAccounts);
+                if (!quota.ok) return res.status(403).json({ ok: false, error: quota.error });
+                payload.username = currentUsername;
+            }
             let wasRunning = false;
             if (isUpdate && ctx.provider.isAccountRunning) {
                 wasRunning = ctx.provider.isAccountRunning(payload.id);
@@ -131,10 +155,18 @@ function mountAccountRoutes(app: Application, ctx: AdminContext): void {
 
     app.delete('/api/accounts/:id', (req: Request, res: Response) => {
         try {
-            const resolvedId = resolveAccId(ctx, req.params.id) || String(req.params.id || '');
+            const resolvedId = resolveAccId(ctx, req.params.id, req as any) || String(req.params.id || '');
 
             const before = ctx.provider.getAccounts();
             const target = findAccountByRef(before.accounts || [], req.params.id);
+            const currentUser = (req as any).currentUser || { role: 'admin', username: 'admin' };
+            const adminMode = currentUser.role === 'admin' || currentUser.role === 'super_admin';
+            if (!adminMode && target) {
+                const owner = String((target as any).username || '');
+                if (owner && owner !== String(currentUser.username || '')) {
+                    return res.status(403).json({ ok: false, error: '该农场账号已绑定其他用户' });
+                }
+            }
             ctx.provider.stopAccount(resolvedId);
             const data = deleteAccount(resolvedId);
             if (ctx.provider.addAccountLog) {

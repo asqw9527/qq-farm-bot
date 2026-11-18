@@ -22,6 +22,7 @@ const { mountActivityCenterRoutes } = require('./activity-center-routes');
 const { mountCommerceRoutes } = require('./commerce-routes');
 const { mountWxLoginRoutes } = require('./wx-login-routes');
 const { mountQqLoginRoutes } = require('./qq-login-routes');
+const { mountUserRoutes } = require('./user-routes');
 const {
     setupSocketIO,
     emitRealtimeStatus: _emitStatus,
@@ -55,7 +56,7 @@ function startAdminServer(dataProvider: any): void {
         }
 
         res.header('Access-Control-Allow-Methods', 'GET, POST, DELETE, OPTIONS, PUT');
-        res.header('Access-Control-Allow-Headers', 'Content-Type, x-account-id, x-admin-token, x-proxy-api-key, x-proxy-api-url, x-proxy-app-id');
+        res.header('Access-Control-Allow-Headers', 'Content-Type, x-account-id, x-admin-token, x-user-token, Authorization, x-proxy-api-key, x-proxy-api-url, x-proxy-app-id');
         res.header('Access-Control-Allow-Credentials', 'true');
         res.header('Access-Control-Max-Age', '86400');
 
@@ -74,6 +75,7 @@ function startAdminServer(dataProvider: any): void {
 
     // Mount route modules
     mountAuthRoutes(app, ctx);
+    mountUserRoutes(app, ctx);
     mountWxLoginRoutes(app, ctx);
     mountQqLoginRoutes(app, ctx);
     mountFarmRoutes(app, ctx);

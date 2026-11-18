@@ -37,6 +37,9 @@ Update.log
 .idea/
 .vscode/
 
+# WorkBuddy local data (do not commit)
+.workbuddy/
+
 # OS
 .DS_Store
 Thumbs.db

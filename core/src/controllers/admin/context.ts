@@ -10,6 +10,8 @@ export {};
 
 export interface AdminContext {
     tokens: Set<string>;
+    // token -> 当前登录用户（AuthResult）。旧 token 无对应用户时按 admin 兼容处理。
+    tokenUsers: Map<string, any>;
     app: Application | null;
     server: Server | null;
     io: SocketIOServer | null;
@@ -18,8 +20,10 @@ export interface AdminContext {
 
 function createAdminContext(dataProvider: any): AdminContext {
     const tokens = new Set<string>();
+    const tokenUsers = new Map<string, any>();
     return {
         tokens,
+        tokenUsers,
         app: null,
         server: null,
         io: null,

@@ -8,6 +8,8 @@ export interface Account {
   qq: string;
   avatar: string;
   nick?: string;
+  // 多用户体系：账号归属的用户名，空表示未绑定（兼容旧数据）
+  username?: string;
   createdAt: number;
   updatedAt: number;
 }

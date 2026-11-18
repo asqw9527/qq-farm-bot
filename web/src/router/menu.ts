@@ -69,6 +69,13 @@ export const menuRoutes: MenuItem[] = [
     component: () => import('@/views/GameMall.vue'),
   },
   {
+    path: 'users',
+    name: 'UserManagement',
+    label: '账号',
+    icon: 'i-carbon-user-multiple',
+    component: () => import('@/views/UserManagement.vue'),
+  },
+  {
     path: 'settings',
     name: 'Settings',
     label: '设置',
