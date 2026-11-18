@@ -6,6 +6,7 @@ export {};
 
 const { Server } = require('socket.io');
 const SocketIOServer = Server;
+const userStore = require('../../models/user-store');
 
 const {
     resolveAccId,
@@ -13,7 +14,17 @@ const {
 
 function applySocketSubscription(ctx: AdminContext, socket: any, accountRef: string = ''): void {
     const incoming = String(accountRef || '').trim();
-    const resolved = incoming && incoming !== 'all' ? resolveAccId(ctx, incoming) : '';
+    // 复用 HTTP 鉴权的用户解析：由 token 得到当前用户，构造轻量 req 供归属过滤使用。
+    // 无映射 token 视为管理员，保持旧行为；普通用户仅能订阅归属自己的账号。
+    const token = String(socket.data.adminToken || '');
+    let currentUser = ctx.tokenUsers && token ? ctx.tokenUsers.get(token) : undefined;
+    if (!currentUser && token) {
+        const resolvedUser = userStore.getAuthResultByToken(token);
+        if (resolvedUser) currentUser = resolvedUser;
+    }
+    if (!currentUser) currentUser = { username: 'admin', role: 'admin', accountLimit: -1 };
+    const reqLike = { currentUser, headers: {} };
+    const resolved = incoming && incoming !== 'all' ? resolveAccId(ctx, incoming, reqLike) : '';
 
     for (const room of socket.rooms) {
         if (room.startsWith('account:')) socket.leave(room);

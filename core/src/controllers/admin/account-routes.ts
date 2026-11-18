@@ -42,7 +42,7 @@ function mountAccountRoutes(app: Application, ctx: AdminContext): void {
         try {
             const body = (req.body && typeof req.body === 'object') ? req.body : {};
             const rawRef = body.id || body.accountId || body.uin || req.headers['x-account-id'];
-            const accountList = getAccountList(ctx);
+            const accountList = getAccountList(ctx, req as any);
             const target = findAccountByRef(accountList, rawRef);
             if (!target || !target.id) {
                 return res.status(404).json({ ok: false, error: 'Account not found' });
@@ -94,8 +94,9 @@ function mountAccountRoutes(app: Application, ctx: AdminContext): void {
             // 归属校验：普通用户不能操作归属他人的账号；新增时校验账号上限并绑定归属
             if (isUpdate && !adminMode) {
                 const target = allAccounts.find((a: any) => String(a.id) === String(payload.id));
-                if (target && String(target.username || '') && String(target.username || '') !== currentUsername) {
-                    return res.status(403).json({ ok: false, error: '该农场账号已绑定其他用户' });
+                // 无归属账号（owner 为空）视为管理员独有，普通用户一律不可改
+                if (target && String(target.username || '') !== currentUsername) {
+                    return res.status(403).json({ ok: false, error: '该农场账号不属于当前用户' });
                 }
             }
             if (!isUpdate) {
@@ -155,7 +156,11 @@ function mountAccountRoutes(app: Application, ctx: AdminContext): void {
 
     app.delete('/api/accounts/:id', (req: Request, res: Response) => {
         try {
-            const resolvedId = resolveAccId(ctx, req.params.id, req as any) || String(req.params.id || '');
+            const resolvedId = resolveAccId(ctx, req.params.id, req as any);
+            // 解析不到说明账号不在当前用户可见范围内（含无归属旧账号），直接拒绝
+            if (!resolvedId) {
+                return res.status(404).json({ ok: false, error: 'Account not found' });
+            }
 
             const before = ctx.provider.getAccounts();
             const target = findAccountByRef(before.accounts || [], req.params.id);
@@ -163,8 +168,9 @@ function mountAccountRoutes(app: Application, ctx: AdminContext): void {
             const adminMode = currentUser.role === 'admin' || currentUser.role === 'super_admin';
             if (!adminMode && target) {
                 const owner = String((target as any).username || '');
-                if (owner && owner !== String(currentUser.username || '')) {
-                    return res.status(403).json({ ok: false, error: '该农场账号已绑定其他用户' });
+                // 无归属账号视为管理员独有，普通用户一律不可删
+                if (owner !== String(currentUser.username || '')) {
+                    return res.status(403).json({ ok: false, error: '该农场账号不属于当前用户' });
                 }
             }
             ctx.provider.stopAccount(resolvedId);
@@ -195,10 +201,10 @@ function mountAccountRoutes(app: Application, ctx: AdminContext): void {
     // API: 日志
     app.get('/api/logs', (req: Request, res: Response) => {
         const queryAccountIdRaw = (req.query.accountId || '').toString().trim();
-        const id = queryAccountIdRaw ? (queryAccountIdRaw === 'all' ? '' : resolveAccId(ctx, queryAccountIdRaw)) : getAccId(ctx, req);
-        // 如果没有指定账号ID，获取所有账号的日志
+        const id = queryAccountIdRaw ? (queryAccountIdRaw === 'all' ? '' : resolveAccId(ctx, queryAccountIdRaw, req as any)) : getAccId(ctx, req);
+        // 如果没有指定账号ID，获取所有账号的日志（按当前用户可见范围）
         if (!id) {
-            const accountIds = getAccountIds(ctx);
+            const accountIds = getAccountIds(ctx, req as any);
             const allLogs: any[] = [];
             const options = {
                 limit: Number.parseInt(req.query.limit as string) || 100,

@@ -87,10 +87,9 @@ function getAccountList(ctx: AdminContext, req?: AuthenticatedRequest): any[] {
     }
     if (req && req.currentUser && !isAdminUser(req)) {
         const username = String(req.currentUser.username || '');
-        accounts = accounts.filter((a: any) => {
-            const owner = String(a.username || '');
-            return !owner || owner === username;
-        });
+        // 严格归属隔离：普通用户仅可见自己添加的账号。
+        // 无归属（旧账号）仅管理员可见，避免普通用户看到/操作管理员的农场。
+        accounts = accounts.filter((a: any) => String(a.username || '') === username);
     }
     return accounts;
 }
@@ -140,6 +139,11 @@ function handleApiError(res: Response, err: any): void {
 function resolveAccId(ctx: AdminContext, rawRef: any, req?: AuthenticatedRequest): string {
     const input = normalizeAccountRef(rawRef);
     if (!input) return '';
+    // 非管理员只从「可见账号列表」解析，杜绝 provider 解析与 fallback 绕过归属隔离。
+    // 找不到时返回空串，调用方据此判定无权访问该账号。
+    if (req && req.currentUser && !isAdminUser(req)) {
+        return resolveAccountId(getAccountList(ctx, req), input);
+    }
     if (ctx.provider && typeof ctx.provider.resolveAccountId === 'function') {
         const resolvedByProvider = normalizeAccountRef(ctx.provider.resolveAccountId(input));
         if (resolvedByProvider) return resolvedByProvider;
