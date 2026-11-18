@@ -25,6 +25,8 @@ const MAX_ATTEMPTS_PER_IP = 6;
 const IP_LOCKOUT_DURATION = 10 * 60 * 1000;
 const USER_TOKEN_TTL = 24 * 60 * 60 * 1000;
 const DAY_MS = 24 * 60 * 60 * 1000;
+// 新注册普通用户未使用卡密时的默认体验时长：30 分钟
+const TRIAL_DURATION_MS = 30 * 60 * 1000;
 
 interface Card {
     code: string;
@@ -50,6 +52,7 @@ interface User {
     accountLimit?: number;  // -1 = unlimited, 0 = use default
     expiresAt?: number;
     isPermanent?: boolean;
+    isTrial?: boolean;      // 无卡密注册的体验账号（默认 30 分钟）
     mustChangePassword?: boolean;
     createdAt: number;
 }
@@ -116,6 +119,7 @@ function normalizeUser(raw: any): User | null {
         accountLimit: raw.accountLimit === undefined ? undefined : Number(raw.accountLimit),
         expiresAt: Number(raw.expiresAt) || undefined,
         isPermanent: raw.isPermanent === true,
+        isTrial: raw.isTrial === true || undefined,
         mustChangePassword: raw.mustChangePassword === true || undefined,
         createdAt: Number(raw.createdAt) || Date.now(),
     };
@@ -367,11 +371,25 @@ function registerUser(username: string, password: string, cardCode: string): { o
     if (!validation.valid) return { ok: false, error: validation.errors[0] };
 
     const code = String(cardCode || '').trim();
+    const now = Date.now();
+
+    // 未填写卡密：允许直接注册，默认 30 分钟后到期（体验账号）。
     if (!code) {
-        const available = cards.filter(c => c.type === 'time' && !c.usedBy && c.enabled).length;
-        if (available === 0) return { ok: false, error: '注册失败，请联系管理员' };
-        return { ok: false, error: '请输入卡密' };
+        const newUser: User = {
+            username: name,
+            password: security.hashPassword(String(password)),
+            role: 'user',
+            accountLimit: DEFAULT_ACCOUNT_LIMIT,
+            expiresAt: now + TRIAL_DURATION_MS,
+            isPermanent: false,
+            isTrial: true,
+            createdAt: now,
+        };
+        users.push(newUser);
+        saveUsers();
+        return { ok: true, user: buildAuthResult(newUser) };
     }
+
     const cidx = findCardIndex(code);
     if (cidx < 0) return { ok: false, error: '卡密不存在' };
     const card = cards[cidx];
@@ -379,7 +397,7 @@ function registerUser(username: string, password: string, cardCode: string): { o
     if (card.usedBy) return { ok: false, error: '卡密已被使用' };
     if (card.type === 'quota') return { ok: false, error: '注册只能使用时间卡密，额度卡密请登录后在续费中使用' };
 
-    const now = Date.now();
+    // 填写卡密：到期时间完全按卡密时长计算。
     const durationMs = card.durationMs && card.durationMs > 0 ? card.durationMs : DAY_MS;
     const expiresAt = card.isPermanent ? 0 : now + durationMs;
     const cardCopy: Card = { ...card, usedBy: name, usedAt: now, expiresAt };
@@ -427,6 +445,11 @@ function renewUser(username: string, cardCode: string): { ok: boolean; message?:
     } else {
         if (!user.card) user.card = { ...card };
         let prevExpiresAt = user.expiresAt || (user.card.expiresAt || 0);
+        // 体验账号首次添加时间卡密：按卡密时长从当前时间重新计算，不叠加默认 30 分钟体验时长。
+        if (user.isTrial) {
+            prevExpiresAt = 0;
+            user.isTrial = false;
+        }
         if (prevExpiresAt > 0 && prevExpiresAt < now) prevExpiresAt = 0;
         if (card.isPermanent) {
             user.isPermanent = true;

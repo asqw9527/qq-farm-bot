@@ -51,18 +51,15 @@ const storedTab = localStorage.getItem('settings-active-tab')
 const settingsTabKeys: SettingsTab[] = ['account', 'strategy', 'automation', 'system']
 // 牧场的自动化与养殖策略已移到「牧场策略」页，设置页只保留账号与系统。
 const ranchTabKeys: SettingsTab[] = ['account', 'system']
-// 系统设置仅管理员可见，普通用户进入设置页时自动回落到账号管理。
+// 系统设置对所有角色可见：管理员看到全部设置，普通用户仅能修改自己的账号密码。
 const isAdmin = computed(() => userStore.isAdmin)
 const allowedTabKeys = computed<SettingsTab[]>(() => {
-  const keys = inRanch.value ? ranchTabKeys : settingsTabKeys
-  return isAdmin.value ? keys : keys.filter(key => key !== 'system')
+  return inRanch.value ? ranchTabKeys : settingsTabKeys
 })
 
 function resolveInitialTab(candidate: SettingsTab | string): SettingsTab {
   if (allowedTabKeys.value.includes(candidate as SettingsTab))
     return candidate as SettingsTab
-  if (!isAdmin.value && (candidate === 'system' || candidate === 'user'))
-    return 'account'
   return allowedTabKeys.value[0] ?? 'account'
 }
 
@@ -1987,13 +1984,63 @@ async function handleResetSystemConfig() {
           />
         </div>
 
-        <!-- 系统设置（仅管理员） -->
-        <div v-else-if="activeTab === 'system' && isAdmin" class="space-y-4">
+        <!-- 系统设置：普通用户仅可修改自己账号密码，管理员可见全部 -->
+        <div v-else-if="activeTab === 'system'" class="space-y-4">
           <h3 class="text-lg text-gray-900 font-bold dark:text-gray-100">
             系统设置
           </h3>
 
-          <div class="grid grid-cols-1 items-start gap-4 xl:grid-cols-2">
+          <!-- 普通用户：仅修改自己账号的密码 -->
+          <section v-if="!isAdmin" class="farm-card rounded-lg p-4">
+            <div class="mb-4 flex items-start gap-3">
+              <div class="h-9 w-9 flex shrink-0 items-center justify-center rounded-lg bg-amber-50 text-amber-600 dark:bg-amber-900/25 dark:text-amber-400">
+                <span class="i-carbon-password text-xl" />
+              </div>
+              <div>
+                <h4 class="text-base text-gray-900 font-bold dark:text-gray-100">
+                  修改账号密码
+                </h4>
+                <p class="mt-0.5 text-xs text-gray-500 dark:text-gray-400">
+                  修改当前登录账号 {{ userStore.username || '自己的' }} 的登录密码
+                </p>
+              </div>
+            </div>
+
+            <div class="grid grid-cols-1 gap-3 sm:grid-cols-3">
+              <BaseInput
+                v-model="passwordForm.old"
+                label="当前密码"
+                type="password"
+                placeholder="当前密码"
+              />
+              <BaseInput
+                v-model="passwordForm.new"
+                label="新密码"
+                type="password"
+                placeholder="至少 6 位"
+              />
+              <BaseInput
+                v-model="passwordForm.confirm"
+                label="确认新密码"
+                type="password"
+                placeholder="再次输入新密码"
+              />
+            </div>
+
+            <div class="mt-3 flex items-center justify-end border-t pt-3 dark:border-gray-700">
+              <BaseButton
+                variant="primary"
+                size="sm"
+                :loading="passwordSaving"
+                @click="handleChangePassword"
+              >
+                修改密码
+              </BaseButton>
+            </div>
+          </section>
+
+          <!-- 管理员：完整系统设置 -->
+          <div v-else class="grid grid-cols-1 items-start gap-4 xl:grid-cols-2">
             <section class="farm-card rounded-lg p-4">
               <div class="mb-4 flex items-start gap-3">
                 <div class="h-9 w-9 flex shrink-0 items-center justify-center rounded-lg bg-blue-50 text-blue-600 dark:bg-blue-900/25 dark:text-blue-400">

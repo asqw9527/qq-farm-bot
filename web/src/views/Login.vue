@@ -72,7 +72,9 @@ async function handleSubmit() {
     if (authMode.value === 'register') {
       const result = await userStore.register(username.value, password.value, cardCode.value)
       if (result.ok) {
-        success.value = '注册成功，请使用该账号登录'
+        success.value = cardCode.value
+          ? '注册成功，请使用该账号登录'
+          : '注册成功，体验时长 30 分钟，请使用该账号登录'
         authMode.value = 'login'
         password.value = ''
         cardCode.value = ''
@@ -222,15 +224,17 @@ onMounted(fetchGameVersion)
         <div v-if="authMode === 'register'" class="form-group">
           <label class="form-label" for="cardCode">
             <span class="i-carbon-ticket" />
-            卡密
+            卡密（选填）
           </label>
           <BaseInput
             id="cardCode"
             v-model="cardCode"
             type="text"
-            placeholder="请输入时间卡密"
-            required
+            placeholder="有卡密请输入，留空则默认体验 30 分钟"
           />
+          <p class="form-hint form-hint-neutral">
+            不填卡密也可注册，账号默认 30 分钟后到期；填写卡密后按卡密时长计算到期时间。
+          </p>
         </div>
 
         <div v-if="authMode === 'claim'" class="claim-tip">
@@ -393,6 +397,11 @@ onMounted(fetchGameVersion)
   margin: 0;
   color: var(--ui-danger);
   font-size: 11px;
+}
+
+.form-hint-neutral {
+  color: var(--ui-text-muted, #6b7280);
+  line-height: 1.5;
 }
 
 .message {
