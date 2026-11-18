@@ -31,6 +31,8 @@ export interface QqLoginTask {
 export interface QqMiniappLoginResult {
     code: string;
     nickname?: string;
+    // 换码时用来校验 NapCat 当前登录的号是否与账号一致
+    uin?: string;
 }
 
 interface QqSession {
@@ -440,8 +442,8 @@ async function getMiniappCode(taskId: string, owner?: string): Promise<QqMiniapp
     }
     const nickname = session.nickname || session.uin;
     return nickname
-        ? { code: session.code, nickname }
-        : { code: session.code };
+        ? { code: session.code, nickname, uin: session.uin || '' }
+        : { code: session.code, uin: session.uin || '' };
 }
 
 async function cancelLoginTask(taskId: string, owner?: string): Promise<void> {
@@ -465,10 +467,27 @@ async function cancelLoginTask(taskId: string, owner?: string): Promise<void> {
     setTimeout(() => sessions.delete(id), 60_000).unref?.();
 }
 
+// 用账号绑定的 NapCat（留空回落全局 loginSettings）换取新的农场 Code。
+// 与扫码流程不同：这里不新建登录任务、不校验 qqQrLogin 开关——账号本来就在跑，
+// 只是被挤下线后需要一张新票据。NapCat 单实例只能登一个 QQ，所以调用方必须
+// 用返回的 uin 与账号 uin 比对，避免把别的号写进这个账号。
+async function refreshFarmCodeForAccount(account: any = {}): Promise<FarmCode> {
+    const settings = store.getLoginSettings ? (store.getLoginSettings() || {}) : {};
+    const base = String(account?.napCatBase || settings.napCatEndpoint || '').trim();
+    if (!base)
+        throw new Error('账号未配置 NapCat 地址，无法换取新 Code');
+    const pluginPath = String(account?.pluginPath || DEFAULT_PLUGIN_PATH).trim() || DEFAULT_PLUGIN_PATH;
+    const result = await fetchFarmCode(base, pluginPath);
+    if (!result || !result.code)
+        throw new Error('NapCat 未返回农场 Code，请检查 qq-farm-code 插件与 QQ 登录状态');
+    return result;
+}
+
 export {
     cancelLoginTask,
     createLoginTask,
     getMiniappCode,
     QQ_MINIAPP_APP_ID,
     queryLoginStatus,
+    refreshFarmCodeForAccount,
 };

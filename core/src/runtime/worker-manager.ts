@@ -45,6 +45,8 @@ interface WorkerManagerOptions {
     onStatusSync?: (accountId: string, status: any, accountName?: string) => void;
     onWorkerLog?: (entry: any, accountId: string, accountName?: string) => void;
     getAccountById?: (accountId: string) => any;
+    // 挤号/400 后换取新 Code：微信走本地长凭据，QQ 走账号绑定的 NapCat（含 uin 比对）
+    refreshAccountCode?: (account: any) => Promise<{ ok: boolean; code?: string; uin?: string; reason?: string }>;
 }
 
 function createWorkerManager(options: WorkerManagerOptions) {
@@ -69,6 +71,7 @@ function createWorkerManager(options: WorkerManagerOptions) {
         onStatusSync,
         onWorkerLog,
         getAccountById,
+        refreshAccountCode,
     } = options;
     const managerScheduler = createScheduler('worker_manager');
 
@@ -130,10 +133,47 @@ function createWorkerManager(options: WorkerManagerOptions) {
 
     // options.keepReconnectPlan：自动重连自己拉起 worker 时保留计划；
     // 其余入口（用户手动启动、手动重启、开机自启）视为人工干预，立即取消等待中的重连计划。
-    function startWorker(account: any, options: { keepReconnectPlan?: boolean } = {}): boolean {
+    // options.skipCodeRefresh：内部递归调用标记，避免手动启动换码后再次进入换码分支。
+    function startWorker(account: any, options: { keepReconnectPlan?: boolean; skipCodeRefresh?: boolean } = {}): boolean {
         if (!account || !account.id) return false;
         if (workers[account.id]) return false;
+        const pendingPlan = reconnectWindows.get(account.id);
+        const resumingFromKickout = !options.keepReconnectPlan && !!pendingPlan && pendingPlan.mode === 'kickout';
         if (!options.keepReconnectPlan) cancelReconnectPlan(account.id, account.name, '已手动启动');
+
+        // 手动启动发生在挤号等待期内时，账号里存的旧 Code 已被对方顶号作废，
+        // 直接用它会撞 WS 400。这里先换新 Code，换不到才用旧 Code 兜底。
+        if (resumingFromKickout && !options.skipCodeRefresh && typeof refreshAccountCode === 'function') {
+            void (async () => {
+                let target = account;
+                try {
+                    const outcome = await refreshAccountCode(account);
+                    if (outcome && outcome.ok && outcome.code) {
+                        const patch: any = { id: account.id, code: String(outcome.code) };
+                        if (outcome.uin && !account.uin) patch.uin = String(outcome.uin);
+                        try { addOrUpdateAccount(patch); } catch { /* 写盘失败仍用内存新 Code */ }
+                        target = { ...account, ...patch };
+                        log('系统', `账号 ${account.name} 手动启动：已换取新 Code`, {
+                            accountId: String(account.id), accountName: account.name,
+                        });
+                        addAccountLog('kickout_code_refreshed', `账号 ${account.name} 手动启动已换取新 Code`, account.id, account.name, { trigger: 'manual_start' });
+                    } else {
+                        const reason = String(outcome?.reason || '未获取到新 Code');
+                        log('错误', `账号 ${account.name} 手动启动：换取新 Code 失败（${reason}），使用旧 Code 尝试`, {
+                            accountId: String(account.id), accountName: account.name,
+                        });
+                        addAccountLog('kickout_code_refresh_failed', `账号 ${account.name} 手动启动换取新 Code 失败（${reason}），使用旧 Code`, account.id, account.name, { trigger: 'manual_start' });
+                    }
+                } catch (error: any) {
+                    const reason = String(error?.message || error || '未知错误');
+                    log('错误', `账号 ${account.name} 手动启动：换取新 Code 异常（${reason}），使用旧 Code 尝试`, {
+                        accountId: String(account.id), accountName: account.name,
+                    });
+                }
+                startWorker(target, { keepReconnectPlan: true, skipCodeRefresh: true });
+            })();
+            return true;
+        }
 
         log('系统', `正在启动账号: ${account.name}`, { accountId: String(account.id), accountName: account.name });
 
@@ -260,6 +300,24 @@ function createWorkerManager(options: WorkerManagerOptions) {
         }
     }
 
+    // 400 后"换码重连"的每日次数上限：换到的 Code 若仍被立即作废（例如对方持续
+    // 用新 Code 顶号），没有上限就会变成每 5 分钟一次的静默循环，日志里也看不出规律。
+    const CODE_EXPIRED_RETRY_LIMIT = 5;
+    const codeExpiredRetries = new Map<string, { date: string; count: number }>();
+    function recordCodeExpiredRetry(accountId: string): boolean {
+        const day = new Date().toISOString().slice(0, 10);
+        const key = String(accountId || '');
+        const current = codeExpiredRetries.get(key);
+        const entry = !current || current.date !== day ? { date: day, count: 0 } : current;
+        if (entry.count >= CODE_EXPIRED_RETRY_LIMIT) {
+            codeExpiredRetries.set(key, entry);
+            return false;
+        }
+        entry.count += 1;
+        codeExpiredRetries.set(key, entry);
+        return true;
+    }
+
     // 发一条"恢复上线"通知（仅一次）。
     function notifyRecovery(accountId: string, accountName: string): void {
         const title = '账号恢复上线通知';
@@ -304,10 +362,10 @@ function createWorkerManager(options: WorkerManagerOptions) {
             attemptsLeft: KICKOUT_RECONNECT_ATTEMPTS,
         });
         const waitMinutes = Math.round(KICKOUT_RECONNECT_WAIT_MS / 60000);
-        log('系统', `账号 ${accountName} 被踢下线，进入 ${waitMinutes} 分钟等待（不立即重连），等待结束后复用当前 Code 重连 ${KICKOUT_RECONNECT_ATTEMPTS} 次`, {
+        log('系统', `账号 ${accountName} 被踢下线，进入 ${waitMinutes} 分钟等待（不立即重连），等待结束后换取新 Code 重连 ${KICKOUT_RECONNECT_ATTEMPTS} 次`, {
             accountId: String(accountId), accountName, reason,
         });
-        addAccountLog('kickout_wait', `账号 ${accountName} 被踢下线，等待 ${waitMinutes} 分钟后用当前 Code 重连 ${KICKOUT_RECONNECT_ATTEMPTS} 次`, accountId, accountName, { reason });
+        addAccountLog('kickout_wait', `账号 ${accountName} 被踢下线，等待 ${waitMinutes} 分钟后换取新 Code 重连 ${KICKOUT_RECONNECT_ATTEMPTS} 次`, accountId, accountName, { reason });
         scheduleKickoutAttempt(accountId, KICKOUT_RECONNECT_WAIT_MS);
     }
 
@@ -354,16 +412,61 @@ function createWorkerManager(options: WorkerManagerOptions) {
 
                 plan.attemptsLeft -= 1;
                 const attemptNo = KICKOUT_RECONNECT_ATTEMPTS - plan.attemptsLeft;
-                log('系统', `账号 ${name} 等待结束，第 ${attemptNo}/${KICKOUT_RECONNECT_ATTEMPTS} 次自动重连（复用当前 Code）`, {
+                log('系统', `账号 ${name} 等待结束，第 ${attemptNo}/${KICKOUT_RECONNECT_ATTEMPTS} 次自动重连：先换取新 Code`, {
                     accountId: String(accountId), accountName: name, reason: plan.reason,
                 });
-                addAccountLog('kickout_reconnect', `账号 ${name} 第 ${attemptNo}/${KICKOUT_RECONNECT_ATTEMPTS} 次自动重连（复用当前 Code）`, accountId, name, { reason: plan.reason });
-                startWorker(acc, { keepReconnectPlan: true });
-                scheduleKickoutAttempt(accountId, RECONNECT_RETRY_MS);
+                addAccountLog('kickout_reconnect', `账号 ${name} 第 ${attemptNo}/${KICKOUT_RECONNECT_ATTEMPTS} 次自动重连：正在换取新 Code`, accountId, name, { reason: plan.reason });
+                void launchKickoutAttempt(accountId, acc, name, attemptNo);
             } catch {
                 // ignore kickout reconnect scheduling errors
             }
         });
+    }
+
+    // 挤号后的一次真实尝试：先换新 Code（旧 Code 已被对方顶号作废），
+    // 换不到才退回旧 Code 兜底。整个过程保持计划不取消，直到真正拉起 worker。
+    async function launchKickoutAttempt(accountId: string, account: any, name: string, attemptNo: number): Promise<void> {
+        let target = account;
+        if (typeof refreshAccountCode === 'function') {
+            // 换码可能要十几秒（QQ 要等插件、微信要做握手），给收尾判定留足余量，
+            // 避免刚启动就被判超时清理。只在确实要换码时才延长。
+            const plan = reconnectWindows.get(accountId);
+            if (plan && plan.mode === 'kickout') {
+                plan.until = Math.max(plan.until, Date.now() + KICKOUT_RECONNECT_FINALIZE_MS + 60000);
+            }
+            try {
+                const outcome = await refreshAccountCode(account);
+                // 换码期间用户可能手动启动/停止，计划已不在则放弃本次尝试。
+                if (!reconnectWindows.has(accountId)) return;
+                if (outcome && outcome.ok && outcome.code) {
+                    const patch: any = { id: account.id, code: String(outcome.code) };
+                    if (outcome.uin && !account.uin) patch.uin = String(outcome.uin);
+                    try { addOrUpdateAccount(patch); } catch { /* 写盘失败仍用新 Code 内存值重连 */ }
+                    target = { ...account, ...patch };
+                    log('系统', `账号 ${name} 已换取新 Code，第 ${attemptNo}/${KICKOUT_RECONNECT_ATTEMPTS} 次重连使用新 Code`, {
+                        accountId: String(accountId), accountName: name,
+                    });
+                    addAccountLog('kickout_code_refreshed', `账号 ${name} 已换取新 Code，使用新 Code 重连`, accountId, name, { attempt: attemptNo });
+                } else {
+                    const reason = String(outcome?.reason || '未获取到新 Code');
+                    log('错误', `账号 ${name} 换取新 Code 失败（${reason}），改用旧 Code 兜底重连`, {
+                        accountId: String(accountId), accountName: name,
+                    });
+                    addAccountLog('kickout_code_refresh_failed', `账号 ${name} 换取新 Code 失败（${reason}），改用旧 Code 兜底`, accountId, name, { attempt: attemptNo });
+                }
+            } catch (error: any) {
+                if (!reconnectWindows.has(accountId)) return;
+                const reason = String(error?.message || error || '未知错误');
+                log('错误', `账号 ${name} 换取新 Code 异常（${reason}），改用旧 Code 兜底重连`, {
+                    accountId: String(accountId), accountName: name,
+                });
+                addAccountLog('kickout_code_refresh_failed', `账号 ${name} 换取新 Code 异常（${reason}），改用旧 Code 兜底`, accountId, name, { attempt: attemptNo });
+            }
+        }
+        // 期间可能已被手动拉起，或计划被取消（手动停止/400 判定失效）。
+        if (!reconnectWindows.has(accountId) || workers[accountId]) return;
+        startWorker(target, { keepReconnectPlan: true });
+        scheduleKickoutAttempt(accountId, RECONNECT_RETRY_MS);
     }
 
     // 安排一次重连尝试。
@@ -565,14 +668,32 @@ function createWorkerManager(options: WorkerManagerOptions) {
             const message = msg.message || '';
             worker.wsError = { code, message, at: Date.now() };
             if (code === 400) {
-                // WS 400 = 服务端明确拒绝 Code，判定失效：停止一切自动重连。
+                // WS 400 = 服务端明确拒绝 Code。旧 Code 已被作废，如果账号具备
+                // 换码能力（微信长凭据 / QQ NapCat），就安排一次换码重连；
+                // 换码不可用或今天的换码重连已用尽，则照旧停止并提示人工处理。
+                const hadPlan = reconnectWindows.has(accountId);
                 markCodeExpired(accountId, 'ws_400');
-                addAccountLog(
-                    'ws_400',
-                    `账号 ${worker.name} 登录失效（Code 已到期），停止自动重连，请更新 Code`,
-                    accountId,
-                    worker.name,
-                );
+                const canRefresh = typeof refreshAccountCode === 'function';
+                if (canRefresh && !hadPlan && recordCodeExpiredRetry(accountId)) {
+                    log('系统', `账号 ${worker.name} Code 已失效（WS 400），已安排换取新 Code 后重连`, {
+                        accountId: String(accountId), accountName: worker.name,
+                    });
+                    addAccountLog(
+                        'ws_400',
+                        `账号 ${worker.name} Code 已失效（WS 400），已安排换取新 Code 后重连`,
+                        accountId,
+                        worker.name,
+                    );
+                    stopWorker(accountId);
+                    beginKickoutReconnect(accountId, worker.name, 'kickout:ws_400');
+                } else {
+                    addAccountLog(
+                        'ws_400',
+                        `账号 ${worker.name} 登录失效（Code 已到期），停止自动重连，请更新 Code`,
+                        accountId,
+                        worker.name,
+                    );
+                }
             }
         } else if (msg.type === 'account_kicked') {
             if (worker.terminalHandled) return;
@@ -580,14 +701,14 @@ function createWorkerManager(options: WorkerManagerOptions) {
             const reason = msg.reason || '未知';
             const reasonCode = Number(msg.reasonCode) || 0;
             const diagnostics = msg.diagnostics || null;
-            log('系统', `账号 ${worker.name} 被踢下线，进入 ${Math.round(KICKOUT_RECONNECT_WAIT_MS / 60000)} 分钟等待（等待结束后复用当前 Code 重连 ${KICKOUT_RECONNECT_ATTEMPTS} 次）`, { accountId: String(accountId), accountName: worker.name, reasonCode, diagnostics });
+            log('系统', `账号 ${worker.name} 被踢下线，进入 ${Math.round(KICKOUT_RECONNECT_WAIT_MS / 60000)} 分钟等待（等待结束后换取新 Code 重连 ${KICKOUT_RECONNECT_ATTEMPTS} 次）`, { accountId: String(accountId), accountName: worker.name, reasonCode, diagnostics });
             triggerOfflineReminder({
                 accountId,
                 accountName: worker.name,
                 reason: `kickout:${reason}`,
                 offlineMs: 0,
             });
-            addAccountLog('kickout_wait', `账号 ${worker.name} 被踢下线，等待 ${Math.round(KICKOUT_RECONNECT_WAIT_MS / 60000)} 分钟后用当前 Code 重连 ${KICKOUT_RECONNECT_ATTEMPTS} 次`, accountId, worker.name, { reason, reasonCode, diagnostics });
+            addAccountLog('kickout_wait', `账号 ${worker.name} 被踢下线，等待 ${Math.round(KICKOUT_RECONNECT_WAIT_MS / 60000)} 分钟后换取新 Code 重连 ${KICKOUT_RECONNECT_ATTEMPTS} 次`, accountId, worker.name, { reason, reasonCode, diagnostics });
             stopWorker(accountId);
             beginKickoutReconnect(accountId, worker.name, `kickout:${reason}`);
         } else if (msg.type === 'account_disconnected') {

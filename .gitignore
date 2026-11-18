@@ -10,6 +10,10 @@ core/client.js
 # Runtime data (contains user credentials and logs)
 core/data/
 
+# 账号文件加密密钥与迁移备份：绝不可提交，泄露即等于账号被接管
+accounts.key
+*.plain.bak
+
 # Debug/test scripts
 core/scripts/
 

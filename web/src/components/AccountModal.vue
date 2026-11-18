@@ -40,6 +40,8 @@ let wxPollController: AbortController | undefined
 let wxPollInFlight: Promise<void> | undefined
 let wxPollKey = ''
 let wxPendingCode = ''
+// 扫码得到的 openid：作为账号身份落盘，服务端据此取出暂存的长凭据
+let wxPendingOpenid = ''
 const qqTaskId = ref('')
 const qqStatus = ref('')
 const qqError = ref('')
@@ -51,6 +53,8 @@ let qqPollController: AbortController | undefined
 let qqPollInFlight: Promise<void> | undefined
 let qqPollKey = ''
 let qqPendingCode = ''
+// QQ 扫码得到的 uin：落盘后换新 Code 时用来校验是同一个号
+let qqPendingUin = ''
 let qrNameSubmitTimer: ReturnType<typeof setTimeout> | undefined
 
 const wechatQrLoginEnabled = computed(() => loginSettingsLoaded.value && loginSettings.value.wechatQrLogin)
@@ -61,6 +65,11 @@ const form = reactive({
   name: '',
   code: '',
   platform: 'qq' as 'qq' | 'wx',
+  // 账号级 NapCat 配置：不同账号可指向不同 NapCat 实例（单实例只能登一个 QQ）
+  napCatBase: '',
+  napCatKey: '',
+  appId: '',
+  ver: '',
 })
 
 // 添加账号
@@ -101,12 +110,16 @@ function clearQrNameSubmitTimer() {
   }
 }
 
-async function addQrAccount(platform: 'wx' | 'qq', code: string, nickname: string) {
+async function addQrAccount(platform: 'wx' | 'qq', code: string, nickname: string, identity = '') {
   const name = form.name.trim() || nickname
-  if (platform === 'wx')
+  if (platform === 'wx') {
     wxPendingCode = code
-  else
+    wxPendingOpenid = identity
+  }
+  else {
     qqPendingCode = code
+    qqPendingUin = identity
+  }
 
   if (!name) {
     if (platform === 'wx') {
@@ -142,6 +155,10 @@ async function submitPendingQrAccount(platform: 'wx' | 'qq') {
   }
 
   const payload: any = { name, code, platform, loginType: 'manual' }
+  if (platform === 'wx' && wxPendingOpenid)
+    payload.wxid = wxPendingOpenid
+  if (platform === 'qq' && qqPendingUin)
+    payload.uin = qqPendingUin
   const saved = await addAccount(payload, !!props.editData)
   if (!saved && props.show && activeLoginTab.value === `${platform}_qr`) {
     if (platform === 'wx')
@@ -210,11 +227,25 @@ async function submitManual() {
     form.code = code
   }
 
+  const platform = props.editData ? (props.editData.platform || 'qq') : form.platform
   const payload: any = {
     name: form.name,
     code,
-    platform: props.editData ? (props.editData.platform || 'qq') : form.platform,
+    platform,
     loginType: 'manual',
+  }
+
+  // 账号级 NapCat：留空则回落到「系统设置 → 登录配置」里的全局地址/Token。
+  // napCatKey 留空表示不修改已保存的值（服务端会忽略空串）。
+  if (platform === 'qq') {
+    if (form.napCatBase.trim())
+      payload.napCatBase = form.napCatBase.trim()
+    if (form.napCatKey.trim())
+      payload.napCatKey = form.napCatKey.trim()
+    if (form.appId.trim())
+      payload.appId = form.appId.trim()
+    if (form.ver.trim())
+      payload.ver = form.ver.trim()
   }
 
   await addAccount(payload, !!props.editData)
@@ -246,6 +277,7 @@ function resetWxLogin() {
   wxQrUrl.value = ''
   wxLoading.value = false
   wxPendingCode = ''
+  wxPendingOpenid = ''
   clearQrNameSubmitTimer()
 }
 
@@ -261,10 +293,11 @@ async function getWxCodeAndAdd(taskId: string, flowVersion: number) {
     return
   const code = String(codeResult.data?.data?.code || '').trim()
   const nickname = String(codeResult.data?.data?.nickname || '').trim()
+  const openid = String(codeResult.data?.data?.openid || '').trim()
   if (!code)
     throw new Error('未获取到登录 Code')
 
-  await addQrAccount('wx', code, nickname)
+  await addQrAccount('wx', code, nickname, openid)
 }
 
 async function confirmWxLogin(taskId: string, flowVersion: number) {
@@ -407,6 +440,7 @@ function resetQqLogin() {
   qqQrUrl.value = ''
   qqLoading.value = false
   qqPendingCode = ''
+  qqPendingUin = ''
   clearQrNameSubmitTimer()
 }
 
@@ -433,9 +467,10 @@ async function getQqCodeAndAdd(taskId: string, flowVersion: number) {
     const payload = ensureQqApiOk(response, '获取小程序授权 Code 失败')
     const code = String(payload?.data?.code || '').trim()
     const nickname = String(payload?.data?.nickname || '').trim()
+    const uin = String(payload?.data?.uin || '').trim()
     if (!code)
       throw new Error('未获取到登录 Code')
-    await addQrAccount('qq', code, nickname)
+    await addQrAccount('qq', code, nickname, uin)
   }
   catch (error: any) {
     if (isQqFlowActive(taskId, flowVersion))
@@ -593,11 +628,20 @@ watch(() => props.show, (newVal) => {
       form.name = props.editData.name || ''
       form.code = props.editData.code || ''
       form.platform = props.editData.platform || 'qq'
+      // napCatKey 不下发浏览器，编辑时留空表示沿用已保存的 Key
+      form.napCatBase = props.editData.napCatBase || ''
+      form.napCatKey = ''
+      form.appId = props.editData.appId || ''
+      form.ver = props.editData.ver || ''
     }
     else {
       form.name = ''
       form.code = ''
       form.platform = 'qq'
+      form.napCatBase = ''
+      form.napCatKey = ''
+      form.appId = ''
+      form.ver = ''
     }
   }
 })
@@ -694,6 +738,39 @@ onBeforeUnmount(() => {
               </NRadio>
             </div>
           </NRadioGroup>
+
+          <div
+            v-if="(editData ? editData.platform : form.platform) === 'qq'"
+            class="space-y-3 pt-2"
+          >
+            <p class="text-xs opacity-70">
+              账号专用 NapCat（可选）：多开时每个账号填不同实例地址；留空则使用系统设置里的全局配置。被挤下线后要靠它换取新 Code。
+            </p>
+            <BaseInput
+              v-model="form.napCatBase"
+              label="NapCat 地址"
+              placeholder="http://127.0.0.1:6099（留空用全局）"
+              class="farm-input"
+            />
+            <BaseInput
+              v-model="form.napCatKey"
+              label="WebUI Token"
+              placeholder="留空表示不修改已保存的 Token"
+              class="farm-input"
+            />
+            <BaseInput
+              v-model="form.appId"
+              label="小程序 appid（可选）"
+              placeholder="留空使用默认值"
+              class="farm-input"
+            />
+            <BaseInput
+              v-model="form.ver"
+              label="客户端版本（可选）"
+              placeholder="留空由系统自动校准"
+              class="farm-input"
+            />
+          </div>
 
           <div class="flex justify-end gap-2 pt-4">
             <BaseButton variant="outline" @click="close">

@@ -2,7 +2,8 @@ import type { Account, AccountsData } from '../../types/account';
 export {};
 
 const { ensureDataDir } = require('../../config/runtime-paths');
-const { readJsonFileStrict, writeJsonFileAtomic, storageError } = require('../../services/json-db');
+const { storageError } = require('../../services/json-db');
+const { readSecureJson, writeSecureJson, migratePlaintextIfNeeded } = require('../../services/secure-accounts-file');
 
 const { ACCOUNTS_FILE } = require('./shared-state');
 let accountsCache: AccountsData | null = null;
@@ -15,9 +16,15 @@ function loadAccounts(): AccountsData {
     accountsCache = null;
     try {
         ensureDataDir();
-        const raw = readJsonFileStrict(ACCOUNTS_FILE, () => ({ accounts: [], nextId: 1 }));
+        const loaded = readSecureJson(ACCOUNTS_FILE, () => ({ accounts: [], nextId: 1 }));
+        const raw = loaded.data;
         if (!raw || !Array.isArray(raw.accounts)) throw new Error('Invalid accounts data');
         const data = normalizeAccountsData(raw);
+        // 旧版本是明文 JSON：读到明文时立刻加密回写（含一次 .plain.bak 备份）。
+        // 迁移失败不阻塞读取，后续任何保存都会写成密文。
+        if (!loaded.encrypted) {
+            try { migratePlaintextIfNeeded(ACCOUNTS_FILE, data); } catch { /* 交给下次保存 */ }
+        }
         accountsCache = data;
         return cloneAccounts(data);
     } catch (error: any) {
@@ -30,7 +37,8 @@ function saveAccounts(data: AccountsData): void {
     try {
         ensureDataDir();
         normalized = normalizeAccountsData(data);
-        writeJsonFileAtomic(ACCOUNTS_FILE, normalized);
+        // 账号文件含 code / loginBuffer / napCatKey，必须密文落盘。
+        writeSecureJson(ACCOUNTS_FILE, normalized);
     }
     catch (error: any) { throw storageError('保存', ACCOUNTS_FILE, error); }
     accountsCache = normalized;
@@ -68,6 +76,19 @@ function normalizeAccount(raw: any): Account {
     if (nick) account.nick = nick;
     const username = String(source.username || '').trim();
     if (username) account.username = username;
+    // 敏感/可选字段：只在有值时写入，避免产生大量空串字段。
+    const wxid = String(source.wxid || '').trim();
+    if (wxid) account.wxid = wxid;
+    const loginBuffer = String(source.loginBuffer || '').trim();
+    if (loginBuffer) account.loginBuffer = loginBuffer;
+    const napCatBase = String(source.napCatBase || '').trim();
+    if (napCatBase) account.napCatBase = napCatBase;
+    const napCatKey = String(source.napCatKey || '').trim();
+    if (napCatKey) account.napCatKey = napCatKey;
+    const appId = String(source.appId || '').trim();
+    if (appId) account.appId = appId;
+    const ver = String(source.ver || '').trim();
+    if (ver) account.ver = ver;
     return account;
 }
 
@@ -77,7 +98,8 @@ function addOrUpdateAccount(acc: Partial<Account> & { avatarUrl?: string }): Acc
     let touchedAccountId = '';
     const source: any = acc || {};
     const cleanAccount: any = {};
-    for (const key of ['id', 'name', 'code', 'platform', 'uin', 'qq', 'avatar', 'avatarUrl', 'nick', 'username']) {
+    for (const key of ['id', 'name', 'code', 'platform', 'uin', 'qq', 'avatar', 'avatarUrl', 'nick', 'username',
+        'wxid', 'loginBuffer', 'napCatBase', 'napCatKey', 'appId', 'ver']) {
         if (source[key] !== undefined) cleanAccount[key] = source[key];
     }
     acc = cleanAccount;
@@ -101,6 +123,12 @@ function addOrUpdateAccount(acc: Partial<Account> & { avatarUrl?: string }): Acc
             // 归属人必须随账号一起落盘，否则新账号变成无归属账号，严格隔离后只有管理员可见。
             ...(acc.username ? { username: String(acc.username) } : {}),
             ...(acc.nick ? { nick: String(acc.nick) } : {}),
+            ...(acc.wxid ? { wxid: String(acc.wxid) } : {}),
+            ...(acc.loginBuffer ? { loginBuffer: String(acc.loginBuffer) } : {}),
+            ...(acc.napCatBase ? { napCatBase: String(acc.napCatBase) } : {}),
+            ...(acc.napCatKey ? { napCatKey: String(acc.napCatKey) } : {}),
+            ...(acc.appId ? { appId: String(acc.appId) } : {}),
+            ...(acc.ver ? { ver: String(acc.ver) } : {}),
             createdAt: Date.now(),
             updatedAt: Date.now(),
         });

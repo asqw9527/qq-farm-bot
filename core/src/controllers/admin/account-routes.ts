@@ -10,6 +10,7 @@ const store = require('../../models/store');
 const userStore = require('../../models/user-store');
 const { addOrUpdateAccount, deleteAccount } = store;
 const { findAccountByRef } = require('../../services/account-resolver');
+const { takeWxLoginCredential } = require('../../services/wx-login/credential-vault');
 const { updateRuntimeConfig, getRuntimeConfig, getDefaultSystemConfig, getDevicePresets, getTimeZoneOptions } = require('../../config/config');
 const { emitAllLogsSnapshot } = require('./socket');
 
@@ -94,6 +95,20 @@ function mountAccountRoutes(app: Application, ctx: AdminContext): void {
 
             const resolvedUpdateId = isUpdate ? resolveAccId(ctx, updateRef, req as any) : '';
             const payload = isUpdate ? { ...body, id: resolvedUpdateId || String(updateRef) } : body;
+
+            // 长凭据只由服务端写入：浏览器传来的 loginBuffer 一律忽略，
+            // 避免被伪造或用错误凭据覆盖已保存的可换码凭据。
+            delete (payload as any).loginBuffer;
+            // NapCat 密钥留空表示"不修改"，不能把已保存的值覆盖成空串。
+            if ('napCatKey' in payload && !String((payload as any).napCatKey || '').trim()) {
+                delete (payload as any).napCatKey;
+            }
+            // 微信扫码新增：按 openid 取出扫码时暂存在服务端的长凭据并随账号落盘。
+            const wxOpenid = String((payload as any).wxid || '').trim();
+            if (wxOpenid) {
+                const loginBuffer = takeWxLoginCredential(wxOpenid);
+                if (loginBuffer) (payload as any).loginBuffer = loginBuffer;
+            }
 
             // 归属校验：普通用户不能操作归属他人的账号；新增时校验账号上限并绑定归属
             if (isUpdate && !adminMode) {

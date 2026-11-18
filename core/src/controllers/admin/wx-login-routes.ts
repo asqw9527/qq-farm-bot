@@ -3,6 +3,7 @@ import type { Application, Request, Response } from 'express';
 import type { AdminContext } from './context';
 import { WxLoginService } from '../../services/wx-login/service';
 import type { ScanStatus, WxLoginSession } from '../../services/wx-login/service';
+import { putWxLoginCredential } from '../../services/wx-login/credential-vault';
 
 export { };
 
@@ -42,7 +43,13 @@ async function confirm(task: Task): Promise<void> {
     await wxLogin.confirm(task.session);
     task.status = 'ready_for_code';
 }
-async function consumeCode(task: Task): Promise<void> { if (task.status !== 'ready_for_code') throw new Error('Login code is not ready'); task.code = await wxLogin.issueCode(task.session, TARGET_APP_ID); }
+async function consumeCode(task: Task): Promise<void> {
+    if (task.status !== 'ready_for_code') throw new Error('Login code is not ready');
+    task.code = await wxLogin.issueCode(task.session, TARGET_APP_ID);
+    // 长凭据只留在服务端：账号创建时按 openid 取出并随账号落盘，
+    // 后续被踢/400 要靠它换取新 Code。destroy() 会清掉 session，必须先暂存。
+    putWxLoginCredential(task.session.openid || '', task.session.loginBuffer || '');
+}
 
 function mountWxLoginRoutes(app: Application, ctx: AdminContext): void {
     app.use('/api/wx-login', createAuthRequired(ctx));

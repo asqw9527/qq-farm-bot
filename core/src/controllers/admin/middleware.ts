@@ -125,7 +125,13 @@ function getAccountList(ctx: AdminContext, req?: AuthenticatedRequest): any[] {
         // 无归属（旧账号）仅管理员可见，避免普通用户看到/操作管理员的农场。
         accounts = accounts.filter((a: any) => String(a.username || '') === username);
     }
-    return accounts;
+    // 敏感凭据只落盘、不出后端：loginBuffer 可无限换新 Code，napCatKey 等于
+    // NapCat 控制权。前端需要的是 wxid/napCatBase/appId 等非密配置。
+    return accounts.map((account: any) => {
+        if (!account || typeof account !== 'object') return account;
+        const { loginBuffer, napCatKey, ...safe } = account;
+        return safe;
+    });
 }
 
 function getAccountIds(ctx: AdminContext, req?: AuthenticatedRequest): string[] {

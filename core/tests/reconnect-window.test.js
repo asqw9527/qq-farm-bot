@@ -263,8 +263,109 @@ test('等待结束后重连：读取 Helper 刷新后的最新 code', () => {
     assert.equal(starts.at(-1).config.code, 'CODE-B', '应使用刷新后的新 code');
 });
 
+test('WS 400 且可换码时：安排等待后换码重连，而不是永久停止', async () => {
+    const clock = makeClock();
+    let calls = 0;
+    const h = buildManager({
+        clock,
+        options: { refreshAccountCode: async () => { calls += 1; return { ok: true, code: 'CODE-AFTER-400' }; } },
+    });
+    const worker = h.attachWorker();
+
+    emitMessage(h, worker, { type: 'ws_error', code: 400, message: 'Unexpected server response: 400' });
+    const timer = h.sched.tasks.get('auto_reconnect_acc-1');
+    assert.ok(timer, '400 且可换码时应安排换码重连');
+    assert.equal(timer.delay, 5 * 60 * 1000, '仍按 5 分钟等待，避免与对方互踢');
+
+    delete h.workers['acc-1'];
+    clock.advance(5 * 60 * 1000);
+    h.sched.tasks.get('auto_reconnect_acc-1').fn();
+    await flush();
+
+    assert.equal(calls, 1, '等待结束应换一次 Code');
+    const starts = h.messages.filter(m => m && m.type === 'start');
+    assert.equal(starts.at(-1).config.code, 'CODE-AFTER-400');
+});
+
+test('WS 400 且无法换码时：维持原行为，停止自动重连', () => {
+    const h = buildManager();
+    const worker = h.attachWorker();
+    emitMessage(h, worker, { type: 'ws_error', code: 400, message: 'Unexpected server response: 400' });
+    assert.equal(h.sched.tasks.has('auto_reconnect_acc-1'), false, '无换码能力时不应安排重连');
+});
+
 // 通过 fakeProc.on 注册的 message handler 投递消息给 manager。
 function emitMessage(h, worker, msg) {
     const handlers = worker.process.__handlers || [];
     for (const fn of handlers) fn(msg);
 }
+
+const flush = () => new Promise(resolve => setImmediate(resolve));
+
+test('等待结束后先换取新 Code，再用新 Code 重连并写回账号', async () => {
+    const clock = makeClock();
+    const patches = [];
+    let calls = 0;
+    const h = buildManager({
+        clock,
+        options: {
+            refreshAccountCode: async () => { calls += 1; return { ok: true, code: 'CODE-NEW', uin: '10001' }; },
+            addOrUpdateAccount: patch => { patches.push(patch); return {}; },
+        },
+    });
+    const worker = h.attachWorker();
+    emitMessage(h, worker, { type: 'account_kicked', reason: '已在其他终端登录' });
+    delete h.workers['acc-1'];
+
+    clock.advance(5 * 60 * 1000);
+    h.sched.tasks.get('auto_reconnect_acc-1').fn();
+    await flush();
+
+    assert.equal(calls, 1, '等待结束应先换一次 Code');
+    const starts = h.messages.filter(m => m && m.type === 'start');
+    assert.equal(starts.at(-1).config.code, 'CODE-NEW', '应使用换取到的新 Code');
+    assert.equal(patches.at(-1).code, 'CODE-NEW', '新 Code 应写回账号');
+    assert.ok(h.accountLogs.some(l => l.action === 'kickout_code_refreshed'), '应记录换码成功');
+});
+
+test('换码失败时用旧 Code 兜底一次，不静默卡死', async () => {
+    const clock = makeClock();
+    const h = buildManager({
+        clock,
+        options: {
+            refreshAccountCode: async () => ({ ok: false, reason: 'NapCat 当前登录的 QQ（2）与账号（1）不一致' }),
+        },
+    });
+    const worker = h.attachWorker();
+    emitMessage(h, worker, { type: 'account_kicked', reason: 'kickout' });
+    delete h.workers['acc-1'];
+
+    clock.advance(5 * 60 * 1000);
+    h.sched.tasks.get('auto_reconnect_acc-1').fn();
+    await flush();
+
+    const starts = h.messages.filter(m => m && m.type === 'start');
+    assert.equal(starts.at(-1).config.code, 'CODE-A', '换码失败应退回旧 Code');
+    assert.ok(h.accountLogs.some(l => l.action === 'kickout_code_refresh_failed'), '应记录换码失败原因');
+});
+
+test('等待期内手动启动：立即取消等待并先换新 Code 再连', async () => {
+    const clock = makeClock();
+    const h = buildManager({
+        clock,
+        options: { refreshAccountCode: async () => ({ ok: true, code: 'CODE-MANUAL', uin: '' }) },
+    });
+    const worker = h.attachWorker();
+    emitMessage(h, worker, { type: 'account_kicked', reason: 'kickout' });
+    assert.ok(h.sched.tasks.has('auto_reconnect_acc-1'));
+
+    delete h.workers['acc-1'];
+    const started = h.manager.startWorker(h.account);
+    await flush();
+
+    assert.equal(started, true);
+    assert.equal(h.sched.tasks.has('auto_reconnect_acc-1'), false, '手动启动应清除等待定时器');
+    const starts = h.messages.filter(m => m && m.type === 'start');
+    assert.equal(starts.at(-1).config.code, 'CODE-MANUAL', '手动启动应使用新换的 Code');
+});
+

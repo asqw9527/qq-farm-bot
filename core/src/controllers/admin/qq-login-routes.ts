@@ -49,7 +49,12 @@ function mountQqLoginRoutes(app: Application, ctx: AdminContext): void {
     app.post('/api/qq-login/tasks/:taskId/code', async (req: Request, res: Response) => {
         try {
             const result = await getMiniappCode(String(req.params.taskId || ''), ownerOf(req));
-            res.json({ ok: true, data: { code: result.code, nickname: result.nickname || '', app_id: QQ_MINIAPP_APP_ID } });
+            // uin 一并返回：账号落盘 uin 后，被挤下线换新 Code 时才能校验
+            // 「NapCat 当前登录的号」是否就是这个账号，避免多开时串号。
+            res.json({
+                ok: true,
+                data: { code: result.code, nickname: result.nickname || '', uin: result.uin || '', app_id: QQ_MINIAPP_APP_ID },
+            });
         }
         catch (error: any) {
             sendError(res, error, 'QQ 小程序授权 Code 获取失败');

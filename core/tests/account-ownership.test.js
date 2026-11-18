@@ -18,15 +18,20 @@ mockModule('models/store/shared-state.js', { ACCOUNTS_FILE: 'virtual-accounts.js
 // 新建/更新账号会调用 ensureAccountConfig 写配置，测试只关心归属字段，mock 掉其依赖链
 mockModule('models/store/account-config.js', { ensureAccountConfig: () => {}, removeAccountConfig: () => {} });
 mockModule('services/json-db.js', {
-    readJsonFileStrict: (_file, fallback) => {
-        if (!mem.accounts.length && mem.nextId === 1) return fallback ? fallback() : { accounts: [], nextId: 1 };
-        return JSON.parse(JSON.stringify(mem));
+    storageError: (_op, _file, err) => err,
+});
+// 账号文件已改为 AES-256-GCM 密文存储：测试只关心归属字段，直接把读写换成内存。
+mockModule('services/secure-accounts-file.js', {
+    readSecureJson: (_file, fallback) => {
+        if (!mem.accounts.length && mem.nextId === 1)
+            return { data: fallback ? fallback() : { accounts: [], nextId: 1 }, encrypted: true };
+        return { data: JSON.parse(JSON.stringify(mem)), encrypted: true };
     },
-    writeJsonFileAtomic: (_file, data) => {
+    writeSecureJson: (_file, data) => {
         mem.accounts = JSON.parse(JSON.stringify(data.accounts));
         mem.nextId = data.nextId;
     },
-    storageError: (_op, _file, err) => err,
+    migratePlaintextIfNeeded: () => false,
 });
 
 let addOrUpdateAccount;
