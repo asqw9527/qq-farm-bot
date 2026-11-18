@@ -514,7 +514,7 @@ function deleteUser(username: string): { ok: boolean; error?: string } {
     if (users[idx].role === 'admin' || users[idx].role === 'super_admin') return { ok: false, error: '不能删除管理员账号' };
     users.splice(idx, 1);
     saveUsers();
-    for (const [tok, meta] of userTokens) if (meta.username === username) userTokens.delete(tok);
+    revokeUserTokens(username);
     return { ok: true };
 }
 
@@ -608,18 +608,28 @@ function getAvailableTimeCardCount(): number {
     return cards.filter(c => c.type === 'time' && !c.usedBy && c.enabled).length;
 }
 
-function claimCardByUA(ua: string, username?: string): { ok: boolean; error?: string; cardCode?: string; days?: number; durationMs?: number } {
+// ip 可选（老调用方兼容）。防刷同时绑定 IP 与 header UA：任一维度在 24h 内领过即拒绝，
+// 攻击者单独更换 UA（或单独更换 IP）都无法绕过。
+function claimCardByUA(ua: string, username?: string, ip?: string): { ok: boolean; error?: string; cardCode?: string; days?: number; durationMs?: number } {
     if (!cardClaimEnabled) return { ok: false, error: '卡密领取功能未开启' };
-    const uaHash = crypto.createHash('sha256').update(String(ua || 'default')).digest('hex');
-    const record = cardClaimRecords[uaHash];
-    if (record && Date.now() - record.claimTime < DAY_MS) {
-        const remaining = DAY_MS - (Date.now() - record.claimTime);
-        return { ok: false, error: `您已经在24小时内领取过一次卡密了！还剩 ${Math.ceil(remaining / 1000)} 秒` };
+    const uaValue = String(ua || 'default');
+    const ipValue = String(ip || '').trim();
+    const hash = (value: string): string => crypto.createHash('sha256').update(value).digest('hex');
+    // 新 key 绑定 IP/UA 维度；同时兼容旧版本仅按 UA hash 存的记录，避免升级后 24h 内重复领取。
+    const keys = [hash(`ua|${uaValue}`), hash(uaValue)];
+    if (ipValue) keys.push(hash(`ip|${ipValue}`));
+    for (const key of keys) {
+        const record = cardClaimRecords[key];
+        if (record && Date.now() - record.claimTime < DAY_MS) {
+            const remaining = DAY_MS - (Date.now() - record.claimTime);
+            return { ok: false, error: `您已经在24小时内领取过一次卡密了！还剩 ${Math.ceil(remaining / 1000)} 秒` };
+        }
     }
     const available = cards.filter(c => c.type === 'time' && !c.usedBy && c.enabled);
     if (available.length === 0) return { ok: false, error: '卡密库存不足，请联系管理员！' };
     const card = available[0];
-    cardClaimRecords[uaHash] = { uaHash, claimTime: Date.now(), cardCode: card.code, username };
+    const now = Date.now();
+    for (const key of keys) cardClaimRecords[key] = { uaHash: key, claimTime: now, cardCode: card.code, username };
     saveCardClaimRecords();
     return { ok: true, cardCode: card.code, days: card.days, durationMs: card.durationMs };
 }
@@ -712,6 +722,20 @@ function revokeUserToken(token: string): void {
     userTokens.delete(token);
 }
 
+// 撤销某个用户名下的全部 token，返回被撤销的 token 列表，便于上层同步清理 ctx 与断开 socket。
+function revokeUserTokens(username: string): string[] {
+    const name = String(username || '');
+    const revoked: string[] = [];
+    if (!name) return revoked;
+    for (const [token, meta] of userTokens) {
+        if (meta.username === name) {
+            userTokens.delete(token);
+            revoked.push(token);
+        }
+    }
+    return revoked;
+}
+
 // ---------- 账号归属 / 配额 ----------
 
 function countAccountsByUsername(username: string, accounts: any[]): number {
@@ -767,6 +791,7 @@ module.exports = {
     validateUserToken,
     getAuthResultByToken,
     revokeUserToken,
+    revokeUserTokens,
     // 卡密
     getCardClaimStatus,
     setCardClaimStatus,

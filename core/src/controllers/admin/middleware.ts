@@ -65,6 +65,32 @@ function createAuthRequired(ctx: AdminContext) {
     };
 }
 
+// 撤销指定用户名下的所有会话：user-store token、ctx 映射，以及对应的 Socket 连接。
+// 用于改密、管理员重置密码、删除用户等场景，确保旧会话不再可用。
+function revokeUserSessions(ctx: AdminContext, username: string): string[] {
+    const name = String(username || '');
+    if (!name) return [];
+    const toDisconnect = new Set<string>(userStore.revokeUserTokens(name));
+    for (const [token, user] of (ctx.tokenUsers ? ctx.tokenUsers.entries() : [])) {
+        if (String((user as any)?.username || '') === name) toDisconnect.add(token);
+    }
+    for (const token of toDisconnect) {
+        ctx.tokens.delete(token);
+        if (ctx.tokenUsers) ctx.tokenUsers.delete(token);
+    }
+    // 断开这些 token 对应的实时连接
+    const sockets = ctx.io && (ctx.io as any).sockets && (ctx.io as any).sockets.sockets;
+    if (sockets && typeof sockets.values === 'function') {
+        for (const socket of sockets.values()) {
+            const token = String((socket as any).data?.adminToken || '');
+            if (token && toDisconnect.has(token)) {
+                try { (socket as any).disconnect(true); } catch {}
+            }
+        }
+    }
+    return Array.from(toDisconnect);
+}
+
 function isAdminUser(req: AuthenticatedRequest): boolean {
     const user = req.currentUser;
     return !!user && (user.role === 'admin' || user.role === 'super_admin');
@@ -218,6 +244,7 @@ module.exports = {
     issueToken,
     createAuthRequired,
     isAdminUser,
+    revokeUserSessions,
     requireAdmin,
     getAccountList,
     getAccountIds,

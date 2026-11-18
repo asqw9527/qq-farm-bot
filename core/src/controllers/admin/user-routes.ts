@@ -8,11 +8,14 @@ export {};
  * 其余路径需要经过 authRequired（req.currentUser 由中间件注入）。
  */
 const userStore = require('../../models/user-store');
+const store = require('../../models/store');
 
 const {
     isAdminUser,
     handleApiError,
     getAccountList,
+    revokeUserSessions,
+    getClientIp,
 } = require('./middleware');
 
 function currentUsername(req: Request): string {
@@ -60,12 +63,14 @@ function mountUserRoutes(app: Application, ctx: AdminContext): void {
         res.json({ ok: true, data: userStore.getCardClaimStatus() });
     });
 
-    // ---- 公开：按 UA 领取卡密（24h 防刷）----
+    // ---- 公开：按 IP + header UA 领取卡密（24h 防刷，忽略请求体里的 userAgent）----
     app.post('/api/users/claim-card', (req: Request, res: Response) => {
         try {
-            const { username, userAgent } = req.body || {};
-            const ua = String(userAgent || req.headers['user-agent'] || 'default');
-            const result = userStore.claimCardByUA(ua, username ? String(username) : undefined);
+            const { username } = req.body || {};
+            // 只信任 HTTP 传输层信息；body.userAgent 客户端可任意伪造，一律忽略。
+            const ua = String(req.headers['user-agent'] || 'default');
+            const ip = getClientIp(req);
+            const result = userStore.claimCardByUA(ua, username ? String(username) : undefined, ip);
             res.json(result);
         } catch (e: any) { return handleApiError(res, e); }
     });
@@ -148,7 +153,13 @@ function mountUserRoutes(app: Application, ctx: AdminContext): void {
             const usernames = Array.isArray((req.body || {}).usernames)
                 ? (req.body.usernames as any[]).map(String)
                 : [String((req.body || {}).username || '')].filter(Boolean);
-            for (const name of usernames) userStore.deleteUser(name);
+            for (const name of usernames) {
+                if (userStore.deleteUser(name).ok) {
+                    revokeUserSessions(ctx, name);
+                    // 解除该用户名下农场账号的归属，避免同名重新注册后继承旧账号。
+                    if (store.unbindAccountsByOwner) store.unbindAccountsByOwner(name);
+                }
+            }
             res.json({ ok: true });
         } catch (e: any) { return handleApiError(res, e); }
     });
@@ -160,6 +171,8 @@ function mountUserRoutes(app: Application, ctx: AdminContext): void {
             const { username, newPassword } = req.body || {};
             const result = userStore.adminChangeUserPassword(String(username || ''), String(newPassword || ''));
             if (!result.ok) return res.status(400).json({ ok: false, error: result.error });
+            // 管理员重置密码后立即吊销目标用户的所有会话，旧 token 不得继续可用。
+            revokeUserSessions(ctx, String(username || ''));
             res.json({ ok: true });
         } catch (e: any) { return handleApiError(res, e); }
     });
@@ -186,6 +199,7 @@ function mountUserRoutes(app: Application, ctx: AdminContext): void {
             if (body.password) {
                 const pwResult = userStore.adminChangeUserPassword(username, String(body.password));
                 if (!pwResult.ok) return res.status(400).json({ ok: false, error: pwResult.error });
+                revokeUserSessions(ctx, username);
             }
             res.json({ ok: true });
         } catch (e: any) { return handleApiError(res, e); }

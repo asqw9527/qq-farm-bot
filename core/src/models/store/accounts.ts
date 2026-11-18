@@ -112,6 +112,24 @@ function addOrUpdateAccount(acc: Partial<Account> & { avatarUrl?: string }): Acc
     return data;
 }
 
+// 解除某个用户名下所有账号的归属（删除用户时调用）。
+// 解绑后账号变为无归属：普通用户不可见，仅管理员可见并可回收，避免同名重新注册继承旧账号。
+function unbindAccountsByOwner(username: string): number {
+    const name = String(username || '');
+    if (!name) return 0;
+    const data = getAccounts();
+    let changed = 0;
+    for (const account of data.accounts) {
+        if (String((account as any).username || '') === name) {
+            delete (account as any).username;
+            account.updatedAt = Date.now();
+            changed++;
+        }
+    }
+    if (changed > 0) saveAccounts(data);
+    return changed;
+}
+
 function deleteAccount(id: unknown): AccountsData {
     const { removeAccountConfig } = require('./account-config');
     const data = getAccounts();
@@ -131,4 +149,5 @@ module.exports = {
     normalizeAccountsData,
     addOrUpdateAccount,
     deleteAccount,
+    unbindAccountsByOwner,
 };

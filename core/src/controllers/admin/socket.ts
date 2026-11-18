@@ -76,6 +76,35 @@ function applySocketSubscription(ctx: AdminContext, socket: any, accountRef: str
     }
 }
 
+// 巡检已连接的 socket：普通用户 token 到期或卡密失效时，从 ctx 移除并主动断开连接。
+// 导出以便测试直接调用，无需等待定时器。
+function enforceSocketTokenExpiry(ctx: AdminContext): number {
+    let disconnected = 0;
+    try {
+        const sockets = ctx.io && (ctx.io as any).sockets && (ctx.io as any).sockets.sockets;
+        if (!sockets || typeof sockets.values !== 'function') return 0;
+        for (const socket of sockets.values()) {
+            const token = String((socket as any).data?.adminToken || '');
+            if (!token) continue;
+            const user = ctx.tokenUsers && ctx.tokenUsers.get(token)
+                || userStore.getAuthResultByToken(token);
+            if (!user || user.role === 'admin' || user.role === 'super_admin') continue;
+            const validated = userStore.validateUserToken(token);
+            if (!validated.ok) {
+                ctx.tokens.delete(token);
+                if (ctx.tokenUsers) ctx.tokenUsers.delete(token);
+                try {
+                    (socket as any).disconnect(true);
+                    disconnected++;
+                } catch {}
+            }
+        }
+    } catch {
+        // ignore watchdog errors
+    }
+    return disconnected;
+}
+
 function setupSocketIO(ctx: AdminContext): void {
     ctx.io = new SocketIOServer(ctx.server as any, {
         path: '/socket.io',
@@ -123,6 +152,12 @@ function setupSocketIO(ctx: AdminContext): void {
             applySocketSubscription(ctx, socket, body.accountId || '');
         });
     });
+
+    // 定时巡检：普通用户的 token 到期或卡密失效后，主动断开其已建立的连接。
+    // 与 HTTP 每请求校验保持一致，避免到期后旧连接继续接收实时数据。
+    const timer = setInterval(() => { enforceSocketTokenExpiry(ctx); }, 30_000);
+    // 不阻止进程退出
+    if (typeof timer.unref === 'function') timer.unref();
 }
 
 function emitRealtimeStatus(ctx: AdminContext, accountId: string, status: any): void {
@@ -160,6 +195,7 @@ function emitRealtimeAccountLog(ctx: AdminContext, entry: any): void {
 
 module.exports = {
     setupSocketIO,
+    enforceSocketTokenExpiry,
     emitAllLogsSnapshot,
     emitRealtimeStatus,
     emitRealtimeLog,

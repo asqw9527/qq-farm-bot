@@ -15,6 +15,7 @@ const {
     createAuthRequired,
     getAccId,
     handleApiError,
+    revokeUserSessions,
 } = require('./middleware');
 
 const adminLogger = createModuleLogger('admin');
@@ -76,10 +77,10 @@ function mountAuthRoutes(app: Application, ctx: AdminContext): void {
         const username = String((req as any).currentUser?.username || 'admin');
         const result = userStore.changeUserPassword(username, String(oldPassword), String(newPassword));
         if (result.ok) {
-            ctx.tokens.clear();
-            if (ctx.tokenUsers) ctx.tokenUsers.clear();
+            // 只撤销当前用户的会话（含其所有设备与 socket），不再清空全局 token 影响其他用户。
+            revokeUserSessions(ctx, username);
         }
-        return res.json({ ok: result.ok, error: result.error, message: result.ok ? '密码修改成功' : undefined });
+        return res.json({ ok: result.ok, error: result.error, message: result.ok ? '密码修改成功，请重新登录' : undefined });
     });
 
     // 免鉴权公开路径：登录、版本、注册/领卡/找回 等用户自助入口
