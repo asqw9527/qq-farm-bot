@@ -41,11 +41,16 @@ function mountAuthRoutes(app: Application, ctx: AdminContext): void {
             });
         }
 
-        const token = issueToken();
+        const role = String(result.role || 'admin');
+        // 普通用户改用 user-store 签发的 token（带 24h TTL），
+        // 使账号到期即时失效逻辑能在中间件中统一校验；管理员沿用原 token。
+        const token = role === 'admin' || role === 'super_admin'
+            ? issueToken()
+            : userStore.newUserToken(result.username);
         ctx.tokens.add(token);
         const authResult = {
             username: result.username,
-            role: result.role || 'admin',
+            role,
             accountLimit: result.accountLimit,
             expiresAt: result.expiresAt,
             isPermanent: result.isPermanent,

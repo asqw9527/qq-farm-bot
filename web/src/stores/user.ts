@@ -2,6 +2,7 @@ import { useStorage } from '@vueuse/core'
 import { defineStore } from 'pinia'
 import { computed } from 'vue'
 import api, { getApiErrorMessage } from '@/api'
+import { sha256Hex } from '@/utils/crypto'
 
 export type UserRole = 'admin' | 'user'
 
@@ -54,7 +55,7 @@ export const useUserStore = defineStore('user', () => {
 
   async function login(loginName: string, password: string): Promise<LoginResult> {
     try {
-      const res = await api.post('/api/login', { username: loginName, password })
+      const res = await api.post('/api/login', { username: loginName, password: await sha256Hex(password) })
       if (res.data.ok) {
         token.value = res.data.data.token
         applyUser({
@@ -75,7 +76,7 @@ export const useUserStore = defineStore('user', () => {
 
   async function register(loginName: string, password: string, cardCode: string) {
     try {
-      const res = await api.post('/api/users/register', { username: loginName, password, cardCode })
+      const res = await api.post('/api/users/register', { username: loginName, password: await sha256Hex(password), cardCode })
       return res.data
     }
     catch (error: any) {
@@ -139,7 +140,7 @@ export const useUserStore = defineStore('user', () => {
   }
 
   async function changePassword(oldPassword: string, newPassword: string) {
-    const res = await api.post('/api/user/change-password', { oldPassword, newPassword })
+    const res = await api.post('/api/user/change-password', { oldPassword: await sha256Hex(oldPassword), newPassword: await sha256Hex(newPassword) })
     return res.data
   }
 

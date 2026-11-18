@@ -3,6 +3,7 @@ import { computed, onMounted, ref } from 'vue'
 import api, { getApiErrorMessage } from '@/api'
 import { useToastStore } from '@/stores/toast'
 import { useUserStore } from '@/stores/user'
+import { sha256Hex } from '@/utils/crypto'
 import BaseButton from '@/components/ui/BaseButton.vue'
 import BaseInput from '@/components/ui/BaseInput.vue'
 
@@ -76,7 +77,7 @@ async function createUser() {
   try {
     const res = await api.post('/api/users', {
       username: newUsername.value,
-      password: newPassword.value,
+      password: await sha256Hex(newPassword.value),
       cardCode: newCardCode.value,
     })
     if (!res.data?.ok) {

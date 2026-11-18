@@ -231,7 +231,12 @@ function initUserStore(): void {
                 }
             }
         } catch { /* ignore legacy read errors */ }
-        if (!passwordHash) passwordHash = security.hashPassword('admin');
+        // 前端统一传 SHA-256 摘要，默认密码也按摘要存储，
+        // 避免全新安装时默认 admin 无法登录。
+        if (!passwordHash) {
+            const defaultDigest = crypto.createHash('sha256').update('admin').digest('hex');
+            passwordHash = security.hashPassword(defaultDigest);
+        }
         users.push({
             username: 'admin',
             password: passwordHash,

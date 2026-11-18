@@ -48,6 +48,18 @@ function createAuthRequired(ctx: AdminContext) {
             if (resolved) currentUser = resolved;
         }
         if (!currentUser) currentUser = { username: 'admin', role: 'admin', accountLimit: -1 };
+        // 普通用户每次请求实时校验：token 24h 过期、卡密到期、账号删除/额度变更即时失效。
+        // 管理员 token 无 TTL 且不受卡密约束，沿用缓存逻辑保持兼容。
+        if (currentUser.role !== 'admin' && currentUser.role !== 'super_admin') {
+            const validated = userStore.validateUserToken(token);
+            if (!validated.ok) {
+                res.status(401).json({ ok: false, error: validated.error || '登录已失效', errorType: 'expired' });
+                return;
+            }
+            req.currentUser = validated.user;
+            next();
+            return;
+        }
         req.currentUser = currentUser;
         next();
     };
