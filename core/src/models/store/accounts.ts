@@ -98,6 +98,9 @@ function addOrUpdateAccount(acc: Partial<Account> & { avatarUrl?: string }): Acc
             uin: acc.uin ? String(acc.uin) : '',
             qq: acc.qq ? String(acc.qq) : (acc.uin ? String(acc.uin) : ''),
             avatar: acc.avatar || acc.avatarUrl || '',
+            // 归属人必须随账号一起落盘，否则新账号变成无归属账号，严格隔离后只有管理员可见。
+            ...(acc.username ? { username: String(acc.username) } : {}),
+            ...(acc.nick ? { nick: String(acc.nick) } : {}),
             createdAt: Date.now(),
             updatedAt: Date.now(),
         });
