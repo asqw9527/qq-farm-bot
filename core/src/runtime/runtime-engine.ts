@@ -84,6 +84,11 @@ function createRuntimeEngine(options: RuntimeEngineOptions = {}) {
         sendConfiguredPush,
         addOrUpdateAccount: store.addOrUpdateAccount,
         deleteAccount: store.deleteAccount,
+        getAccountById: (accountId: string) => {
+            const accounts = store.getAccounts();
+            const list = accounts && Array.isArray(accounts.accounts) ? accounts.accounts : [];
+            return list.find((acc: any) => String(acc && acc.id) === String(accountId)) || null;
+        },
         onStatusSync: (accountId: string, status: any, accountName?: string) => {
             runtimeEvents.emit('status', { accountId, status, accountName });
             if (onStatusSync) onStatusSync(accountId, status, accountName);

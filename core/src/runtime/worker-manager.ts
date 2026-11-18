@@ -2,6 +2,11 @@ export {};
 const { createScheduler } = require('../services/scheduler');
 
 const DEFAULT_API_CALL_TIMEOUT_MS = 10000;
+// 断线后自动重连：仅当 code 未被判定失效（未收到 WS 400）时启用。
+// 窗口内复用账号当前保存的同一个 code 周期性拉起 worker，不把 code 当一次性消耗。
+const RECONNECT_WINDOW_MS = 3 * 60 * 1000;
+const RECONNECT_FIRST_DELAY_MS = 3000;
+const RECONNECT_RETRY_MS = 5000;
 // 好友现场天气需要逐个 Enter/Leave，单批最多 5 位好友；
 // 好友列表只读缓存或拉一次名单，给的余量少一些。
 const API_CALL_TIMEOUTS_MS: Record<string, number> = {
@@ -33,6 +38,7 @@ interface WorkerManagerOptions {
     deleteAccount: (id: string) => void;
     onStatusSync?: (accountId: string, status: any, accountName?: string) => void;
     onWorkerLog?: (entry: any, accountId: string, accountName?: string) => void;
+    getAccountById?: (accountId: string) => any;
 }
 
 function createWorkerManager(options: WorkerManagerOptions) {
@@ -56,8 +62,12 @@ function createWorkerManager(options: WorkerManagerOptions) {
         deleteAccount,
         onStatusSync,
         onWorkerLog,
+        getAccountById,
     } = options;
     const managerScheduler = createScheduler('worker_manager');
+
+    // 断线重连窗口：key=accountId，记录到期时间。收到 WS 400（code 失效）时清除并不再重连。
+    const reconnectWindows = new Map<string, { until: number; reason: string }>();
     const useThreadRuntime = runtimeMode === 'thread' && !(processRef as any).pkg && typeof WorkerThread === 'function';
 
     function createThreadWorker(account: any): any {
@@ -201,6 +211,88 @@ function createWorkerManager(options: WorkerManagerOptions) {
         });
     }
 
+    // 清除某账号的重连窗口与重试定时器。
+    function clearReconnectWindow(accountId: string): void {
+        reconnectWindows.delete(accountId);
+        managerScheduler.clear(`auto_reconnect_${accountId}`);
+    }
+
+    // 判定 code 是否已失效：只有服务端明确给的 WS 400 才是可靠依据。
+    function markCodeExpired(accountId: string, reason: string): void {
+        const hadWindow = reconnectWindows.has(accountId);
+        clearReconnectWindow(accountId);
+        if (hadWindow) {
+            log('系统', `账号 ${accountId} 重连期间确认 Code 已失效（reason=${reason}），停止自动重连，请重新扫码`, { accountId: String(accountId) });
+        }
+    }
+
+    // 发一条"恢复上线"通知（仅一次）。
+    function notifyRecovery(accountId: string, accountName: string): void {
+        const title = '账号恢复上线通知';
+        const content = `账号 ${accountName} 已自动重连成功，恢复正常运行。`;
+        log('系统', `账号 ${accountName} 自动重连成功，已恢复运行`, { accountId: String(accountId), accountName });
+        addAccountLog('reconnect_success', `账号 ${accountName} 自动重连成功，已恢复运行`, accountId, accountName);
+        if (typeof sendConfiguredPush === 'function') {
+            Promise.resolve(sendConfiguredPush({ title, content, accountId, accountName, logLabel: '恢复通知' }))
+                .catch((e: any) => log('错误', `恢复通知发送异常: ${e && e.message ? e.message : e}`));
+        }
+    }
+
+    // 开启重连窗口：code 状态未知（kickout / 非 400 断线）时，窗口内复用当前 code 自动重连。
+    function beginReconnectWindow(accountId: string, accountName: string, reason: string): void {
+        const now = Date.now();
+        const existing = reconnectWindows.get(accountId);
+        if (existing && existing.until > now) return; // 已在窗口内，沿用截止时间，避免反复重置
+        reconnectWindows.set(accountId, { until: now + RECONNECT_WINDOW_MS, reason });
+        log('系统', `账号 ${accountName} 进入 3 分钟自动重连窗口（reason=${reason}），窗口内复用当前 Code 尝试重连`, {
+            accountId: String(accountId), accountName, reason,
+        });
+        addAccountLog('reconnect_window', `账号 ${accountName} 断线，进入 3 分钟自动重连窗口`, accountId, accountName, { reason });
+        scheduleReconnectAttempt(accountId, RECONNECT_FIRST_DELAY_MS);
+    }
+
+    // 安排一次重连尝试。
+    function scheduleReconnectAttempt(accountId: string, delayMs: number): void {
+        const window = reconnectWindows.get(accountId);
+        if (!window) return;
+        managerScheduler.setTimeoutTask(`auto_reconnect_${accountId}`, delayMs, () => {
+            try {
+                const active = reconnectWindows.get(accountId);
+                if (!active) return;
+                if (Date.now() > active.until) {
+                    clearReconnectWindow(accountId);
+                    const acc = typeof getAccountById === 'function' ? getAccountById(accountId) : null;
+                    const name = acc?.name || accountId;
+                    log('系统', `账号 ${name} 3 分钟自动重连窗口结束，仍未连上，请重新扫码获取新 Code`, { accountId: String(accountId), accountName: name });
+                    addAccountLog('reconnect_timeout', `账号 ${name} 自动重连超时，请重新扫码`, accountId, name);
+                    return;
+                }
+                // 已有存活 worker（例如外部 Helper 已刷新 Code 并拉起）则不重复启动，等下次检查状态。
+                if (workers[accountId]) {
+                    scheduleReconnectAttempt(accountId, RECONNECT_RETRY_MS);
+                    return;
+                }
+                const acc = typeof getAccountById === 'function' ? getAccountById(accountId) : null;
+                if (!acc || !acc.id) {
+                    clearReconnectWindow(accountId);
+                    return;
+                }
+                log('系统', `账号 ${acc.name || accountId} 自动重连中（复用当前 Code）`, { accountId: String(accountId), accountName: acc.name || '' });
+                startWorker(acc);
+                scheduleReconnectAttempt(accountId, RECONNECT_RETRY_MS);
+            } catch {
+                // ignore reconnect scheduling errors
+            }
+        });
+    }
+
+    // 收到在线状态且 connected=true：若处于重连窗口，判定恢复成功。
+    function handleReconnectRecovery(accountId: string, accountName: string): void {
+        if (!reconnectWindows.has(accountId)) return;
+        clearReconnectWindow(accountId);
+        notifyRecovery(accountId, accountName);
+    }
+
     function restartWorker(account: any): void {
         if (!account) return;
         const accountId = account.id;
@@ -297,6 +389,8 @@ function createWorkerManager(options: WorkerManagerOptions) {
                 worker.disconnectedSince = 0;
                 worker.autoDeleteTriggered = false;
                 worker.wsError = null;
+                // 重连窗口内一旦真正连上，判定恢复并发恢复通知。
+                handleReconnectRecovery(accountId, worker.name);
             } else if (!worker.stopping) {
                 const now = Date.now();
                 if (!worker.disconnectedSince) worker.disconnectedSince = now;
@@ -356,9 +450,11 @@ function createWorkerManager(options: WorkerManagerOptions) {
             const message = msg.message || '';
             worker.wsError = { code, message, at: Date.now() };
             if (code === 400) {
+                // WS 400 = 服务端明确拒绝 Code，判定失效：停止一切自动重连。
+                markCodeExpired(accountId, 'ws_400');
                 addAccountLog(
                     'ws_400',
-                    `账号 ${worker.name} 登录失效，请更新 Code`,
+                    `账号 ${worker.name} 登录失效（Code 已到期），停止自动重连，请更新 Code`,
                     accountId,
                     worker.name,
                 );
@@ -369,15 +465,16 @@ function createWorkerManager(options: WorkerManagerOptions) {
             const reason = msg.reason || '未知';
             const reasonCode = Number(msg.reasonCode) || 0;
             const diagnostics = msg.diagnostics || null;
-            log('系统', `账号 ${worker.name} 被踢下线，已自动停止账号`, { accountId: String(accountId), accountName: worker.name, reasonCode, diagnostics });
+            log('系统', `账号 ${worker.name} 被踢下线，进入 3 分钟自动重连窗口（窗口内复用当前 Code）`, { accountId: String(accountId), accountName: worker.name, reasonCode, diagnostics });
             triggerOfflineReminder({
                 accountId,
                 accountName: worker.name,
                 reason: `kickout:${reason}`,
                 offlineMs: 0,
             });
-            addAccountLog('kickout_stop', `账号 ${worker.name} 被踢下线，已自动停止`, accountId, worker.name, { reason, reasonCode, diagnostics });
+            addAccountLog('kickout_reconnect', `账号 ${worker.name} 被踢下线，进入 3 分钟自动重连窗口`, accountId, worker.name, { reason, reasonCode, diagnostics });
             stopWorker(accountId);
+            beginReconnectWindow(accountId, worker.name, `kickout:${reason}`);
         } else if (msg.type === 'account_disconnected') {
             if (worker.terminalHandled) return;
             worker.terminalHandled = true;
@@ -416,6 +513,11 @@ function createWorkerManager(options: WorkerManagerOptions) {
                 { source, disconnectCode: code, reason, phase, connectionId: Number(msg.connectionId) || 0, diagnostics: msg.diagnostics || null },
             );
             stopWorker(accountId);
+            // WS 400 已在 ws_error 分支判定 Code 失效并停止重连；其他断线 Code 状态未知，进入重连窗口。
+            const codeExpired = code === 400 || source === 'ws_error' || Number(worker.wsError?.code) === 400;
+            if (!codeExpired) {
+                beginReconnectWindow(accountId, worker.name, `disconnect:${source}:${phase}:${code}`);
+            }
         } else if (msg.type === 'api_response') {
             const { id, result, error } = msg;
             managerScheduler.clear(`api_timeout_${accountId}_${id}`);
