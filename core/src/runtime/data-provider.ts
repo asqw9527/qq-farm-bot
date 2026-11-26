@@ -17,10 +17,13 @@ interface DataProviderOptions {
     broadcastConfigToWorkers: (accountId?: string) => void;
     buildConfigSnapshotForAccount: (accountId: string) => any;
     broadcastGameConfigReload?: () => void;
-    startWorker: (account: any, options?: { keepReconnectPlan?: boolean }) => boolean;
-    stopWorker: (accountId: string) => void;
-    restartWorker: (account: any) => void;
+    startWorker: (account: any, optionsOrSessionId?: { keepReconnectPlan?: boolean; skipCodeRefresh?: boolean } | string) => boolean | Promise<boolean>;
+    stopWorker: (accountId: string) => void | Promise<void>;
+    restartWorker: (account: any) => void | Promise<void>;
     cancelReconnect?: (accountId: string) => boolean;
+    startAccountWorker?: (account: any) => boolean | Promise<boolean>;
+    stopAccountWorker?: (account: any) => void | Promise<void>;
+    detachAllWorkers?: () => Promise<void>;
 }
 
 function createDataProvider(options: DataProviderOptions) {
@@ -119,14 +122,15 @@ function createDataProvider(options: DataProviderOptions) {
         getCollectionsSnapshot: (accountRef: string) => callWorkerApi(resolveAccountRefId(accountRef), 'getCollectionsSnapshot'),
         operateCollections: (accountRef: string, action: string, input: any) => callWorkerApi(resolveAccountRefId(accountRef), 'operateCollections', action, input),
         getRanchState: (accountRef: string, view: string, shopId?: number, hostGid?: string) => callWorkerApi(resolveAccountRefId(accountRef), 'getRanchState', view, shopId, hostGid),
+        clearRanchIllustratedNew: (accountRef: string) => callWorkerApi(resolveAccountRefId(accountRef), 'clearRanchIllustratedNew'),
         prepareRanchAction: (accountRef: string, action: string, input: any) => callWorkerApi(resolveAccountRefId(accountRef), 'prepareRanchAction', action, input),
         operateRanch: (accountRef: string, action: string, input: any) => callWorkerApi(resolveAccountRefId(accountRef), 'operateRanch', action, input),
         claimIllustratedRewards: (accountRef: string, type: number) => callWorkerApi(resolveAccountRefId(accountRef), 'claimIllustratedRewards', type),
         clearIllustratedNew: (accountRef: string, fruitIds: number[]) => callWorkerApi(resolveAccountRefId(accountRef), 'clearIllustratedNew', fruitIds),
         getSolarCalendar: (accountRef: string) => callWorkerApi(resolveAccountRefId(accountRef), 'getSolarCalendar'),
         operateSolarCalendar: (accountRef: string, action: string, input: any) => callWorkerApi(resolveAccountRefId(accountRef), 'operateSolarCalendar', action, input),
-        getFriends: (accountRef: string, forceSync = false) => callWorkerApi(resolveAccountRefId(accountRef), 'getFriends', forceSync, true),
-        getFriendsCache: (accountRef: string) => callWorkerApi(resolveAccountRefId(accountRef), 'getFriendsCache'),
+        getFriends: (accountRef: string, forceSync = false, withStatus = false) => callWorkerApi(resolveAccountRefId(accountRef), 'getFriends', forceSync, true, withStatus),
+        getFriendsCache: (accountRef: string, withStatus = false) => callWorkerApi(resolveAccountRefId(accountRef), 'getFriendsCache', withStatus),
         clearFriendsCache: (accountRef: string) => callWorkerApi(resolveAccountRefId(accountRef), 'clearFriendsCache'),
         getInteractRecords: (accountRef: string) => callWorkerApi(resolveAccountRefId(accountRef), 'getInteractRecords'),
         getFriendLands: (accountRef: string, gid: number) => callWorkerApi(resolveAccountRefId(accountRef), 'getFriendLands', gid, true),
@@ -427,29 +431,29 @@ function createDataProvider(options: DataProviderOptions) {
             return data;
         },
 
-        startAccount: (accountRef: string) => {
+        startAccount: async (accountRef: string) => {
             const accountId = resolveAccountRefId(accountRef);
             const acc = findAccountByAnyRef(accountId || accountRef);
             if (!acc) return false;
-            startWorker(acc);
+            await startWorker(acc);
             return true;
         },
 
-        stopAccount: (accountRef: string) => {
+        stopAccount: async (accountRef: string) => {
             const accountId = resolveAccountRefId(accountRef);
             const acc = findAccountByAnyRef(accountId || accountRef);
             if (!acc) return false;
             // 手动停止要连同等待中的自动重连一起取消，否则停止后会被定时任务重新拉起。
             if (accountId && typeof cancelReconnect === 'function') cancelReconnect(accountId);
-            if (accountId) stopWorker(accountId);
+            if (accountId) await stopWorker(acc);
             return true;
         },
 
-        restartAccount: (accountRef: string) => {
+        restartAccount: async (accountRef: string) => {
             const accountId = resolveAccountRefId(accountRef);
             const acc = findAccountByAnyRef(accountId || accountRef);
             if (!acc) return false;
-            restartWorker(acc);
+            await restartWorker(acc);
             return true;
         },
 

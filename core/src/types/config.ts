@@ -1,3 +1,4 @@
+import type { NotificationTypes } from '../config/notification-types';
 import type { RanchAutomationConfig } from '../config/ranch-automation';
 export {};
 export type PlantingStrategy =
@@ -11,7 +12,7 @@ export type PlantingStrategy =
 
 export type BagSeedFallbackStrategy = Exclude<PlantingStrategy, 'bag_priority'>;
 
-export type FertilizerMode = 'both' | 'normal' | 'organic' | 'smart' | 'none';
+export type FertilizerMode = 'both' | 'normal' | 'organic' | 'smart' | 'none' | 'normal_ripen' | 'organic_ripen';
 
 export type FertilizerLandType = 'blue-crystal' | 'purple-gold' | 'gold' | 'black' | 'red' | 'normal';
 
@@ -77,6 +78,7 @@ export interface AccountConfig {
   knownFriendGidSyncCooldownSec: number;
   friendsListCacheTtlSec: number;
   friendBlacklist: number[];
+  ranchFriendBlacklist: number[];
   plantBlacklist: number[];
   stealDelaySeconds: number;
   plantOrderRandom: boolean;
@@ -101,7 +103,17 @@ export interface AccountConfig {
   autoAcceptHarvestStealSteal: number;
 }
 
+export interface OfflineReminderChannel {
+  channel: string;
+  enabled: boolean;
+  endpoint: string;
+  token: string;
+  secret: string;
+}
+
 export interface OfflineReminder {
+  notificationTypes: NotificationTypes;
+  channels: OfflineReminderChannel[];
   channel: string;
   endpoint: string;
   token: string;

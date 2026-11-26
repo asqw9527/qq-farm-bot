@@ -21,7 +21,7 @@ const emit = defineEmits<{
 }>()
 
 const attrs = useAttrs()
-const model = defineModel<string | number>()
+const model = defineModel<string | number | null>()
 
 const textValue = computed({
   get: () => model.value === undefined || model.value === null ? '' : String(model.value),

@@ -1,6 +1,11 @@
 export {};
 const { createScheduler } = require('../services/scheduler');
 
+const { BackendChildTracker } = require('@qq-farm-bot/session-contract');
+const { accountSessionKey, findAccountSession, listHostedSessions, stopHostedAccount } = require('../session/ipc');
+const { getRuntimePaths } = require('../config/runtime-paths');
+const path = require('node:path');
+
 const DEFAULT_API_CALL_TIMEOUT_MS = 10000;
 // 被踢下线（其他位置登录）后：先静默等待固定时长，避开与另一处登录互相顶号，
 // 等待结束后再用当前保存的同一个 code 重连固定次数。
@@ -22,6 +27,7 @@ const API_CALL_TIMEOUTS_MS: Record<string, number> = {
     getPetDiaryFriend: 30000,
     scanWeatherFriends: 60000,
     getWeatherFriends: 30000,
+    clearRanchIllustratedNew: 40000,
 };
 
 interface WorkerManagerOptions {
@@ -126,6 +132,10 @@ function createWorkerManager(options: WorkerManagerOptions) {
     }
     const useThreadRuntime = runtimeMode === 'thread' && !(processRef as any).pkg && typeof WorkerThread === 'function';
 
+    const managed = Boolean(processRef.env.FARM_SESSION_SOCKET);
+    const tracker = managed && !useThreadRuntime ? new BackendChildTracker(path.join(getRuntimePaths().runtimeDir, 'backend-children.json')) : null;
+    let shuttingDown = false;
+
     function createThreadWorker(account: any): any {
         const workerOptions: any = {
             workerData: {
@@ -166,10 +176,16 @@ function createWorkerManager(options: WorkerManagerOptions) {
         return createForkWorker(account);
     }
 
+    // 兼容两种调用形态：
+    // - 本地断线重连体系：startWorker(account, { keepReconnectPlan, skipCodeRefresh })
+    // - 上游会话托管体系：startWorker(account, sessionId)
     // options.keepReconnectPlan：自动重连自己拉起 worker 时保留计划；
     // 其余入口（用户手动启动、手动重启、开机自启）视为人工干预，立即取消等待中的重连计划。
     // options.skipCodeRefresh：内部递归调用标记，避免手动启动换码后再次进入换码分支。
-    function startWorker(account: any, options: { keepReconnectPlan?: boolean; skipCodeRefresh?: boolean } = {}): boolean {
+    function startWorker(account: any, optionsOrSessionId: { keepReconnectPlan?: boolean; skipCodeRefresh?: boolean } | string = {}): boolean {
+        if (shuttingDown) return false;
+        const options = typeof optionsOrSessionId === 'string' ? {} : optionsOrSessionId;
+        const sessionId = typeof optionsOrSessionId === 'string' ? optionsOrSessionId : undefined;
         if (!account || !account.id) return false;
         if (workers[account.id]) return false;
         // 已在换码中：把这次启动并入那一次，换码完成后会自行拉起，避免并发拿旧 Code 启动。
@@ -229,6 +245,7 @@ function createWorkerManager(options: WorkerManagerOptions) {
         let child: any = null;
         try {
             child = createWorkerProcess(account);
+            tracker?.register(child.pid, 'account', String(account.id));
         } catch (err: any) {
             const reason = err && err.message ? err.message : String(err || 'unknown error');
             log('错误', `账号 ${account.name} 启动失败: ${reason}`, { accountId: String(account.id), accountName: account.name });
@@ -238,6 +255,7 @@ function createWorkerManager(options: WorkerManagerOptions) {
 
         workers[account.id] = {
             process: child,
+            accountKey: accountSessionKey(account),
             status: null,
             logs: [],
             requests: new Map(),
@@ -256,7 +274,8 @@ function createWorkerManager(options: WorkerManagerOptions) {
         child.send({
             type: 'start',
             config: {
-                code: account.code,
+                code: sessionId ? undefined : account.code,
+                accountId: String(account.id), accountKey: accountSessionKey(account), sessionId,
                 platform: account.platform,
                 systemTimeZone: initialConfigSnapshot.systemTimeZone,
                 systemServerUrl: initialConfigSnapshot.systemServerUrl,
@@ -276,6 +295,7 @@ function createWorkerManager(options: WorkerManagerOptions) {
         });
 
         child.on('exit', (code: number, signal: string) => {
+            tracker?.unregister(child.pid);
             const current = workers[account.id];
             if (!current || current.process !== child) return;
             const displayName = current.name || account.name;
@@ -321,6 +341,41 @@ function createWorkerManager(options: WorkerManagerOptions) {
         });
     }
 
+    // ===== 上游会话托管能力（FARM_SESSION_SOCKET 模式）=====
+    // 先停止本实例的业务工作进程。只有面板显式停止账号才关闭游戏连接。
+    function endWorker(worker: any, type: 'stop' | 'detach'): Promise<void> {
+        worker.stopping = true;
+        const child = worker.process;
+        return new Promise((resolve, reject) => {
+            const timer = setTimeout(() => { child.kill(); }, 2500);
+            const onExit = () => { clearTimeout(timer); resolve(); };
+            child.once('exit', onExit);
+            if (child.exitCode != null || child.signalCode) { onExit(); return; }
+            try { child.send({ type }); }
+            catch (err) { if (child.connected !== false) { clearTimeout(timer); child.off('exit', onExit); reject(err); } }
+        });
+    }
+
+    async function startAccountWorker(account: any) {
+        if (!managed || workers[account.id]) return startWorker(account);
+        const session = findAccountSession(await listHostedSessions(), account);
+        return startWorker(account, session?.sessionId);
+    }
+
+    async function stopAccountWorker(account: any) {
+        if (!managed) { stopWorker(account.id); return; }
+        const worker = workers[account.id];
+        const key = worker?.accountKey || accountSessionKey(account);
+        if (worker) await endWorker(worker, 'stop');
+        await stopHostedAccount(String(account.id), key);
+    }
+
+    async function detachAllWorkers() {
+        shuttingDown = true;
+        await Promise.all(Object.values(workers).map(worker => endWorker(worker, 'detach')));
+    }
+
+    // ===== 本地断线重连体系 =====
     // 清除某账号的重连计划与重试定时器。
     function clearReconnectWindow(accountId: string): void {
         reconnectWindows.delete(accountId);
@@ -563,7 +618,9 @@ function createWorkerManager(options: WorkerManagerOptions) {
         notifyRecovery(accountId, accountName);
     }
 
-    function restartWorker(account: any): void {
+    function restartWorker(account: any): void | Promise<void> {
+        // 会话托管模式优先走上游的停止-启动流程；非托管模式走本地重连体系。
+        if (managed && account) return stopAccountWorker(account).then(() => { startWorker(account); });
         if (!account) return;
         const accountId = account.id;
         const worker = workers[accountId];
@@ -839,6 +896,21 @@ function createWorkerManager(options: WorkerManagerOptions) {
                 else req.resolve(result);
                 worker.requests.delete(id);
             }
+        } else if (msg.type === 'ranch_friend_blacklist_add') {
+            const gid = Number(msg.gid);
+            if (!Number.isSafeInteger(gid) || gid <= 0) return;
+            try {
+                const { addRanchFriendToBlacklist } = require('../models/store');
+                if (!addRanchFriendToBlacklist(accountId, gid)) return;
+                worker.process.send({ type: 'config_sync', config: buildConfigSnapshotForAccount(accountId) });
+                log('牧场', `${msg.friendName || `GID:${gid}`} 不是好友，已加入牧场黑名单`, {
+                    accountId: String(accountId), accountName: worker.name, module: 'ranch', event: 'ranch_friend_blacklist', result: 'ok',
+                });
+            } catch (error: any) {
+                log('牧场', `同步牧场黑名单失败：${error.message}`, {
+                    accountId: String(accountId), accountName: worker.name, module: 'ranch', event: 'ranch_friend_blacklist', result: 'error',
+                });
+            }
         } else if (msg.type === 'friend_blacklist_add') {
             const gid = Number(msg.gid) || 0;
             if (gid > 0) {
@@ -872,12 +944,9 @@ function createWorkerManager(options: WorkerManagerOptions) {
                 friendCount: saved.length,
             });
         } else if (msg.type === 'push_notify') {
-            const title = String(msg.title || '').trim();
-            const content = String(msg.content || '').trim();
-            if (!title || !content || typeof sendConfiguredPush !== 'function') return;
+            if (!Array.isArray(msg.candidates) || typeof sendConfiguredPush !== 'function') return;
             Promise.resolve(sendConfiguredPush({
-                title,
-                content,
+                candidates: msg.candidates,
                 accountId,
                 accountName: worker.name,
             })).catch((e: any) => {
@@ -925,6 +994,8 @@ function createWorkerManager(options: WorkerManagerOptions) {
         callWorkerApi,
         // 手动停止账号时一并取消等待中的自动重连，避免停止后又被定时任务拉起。
         cancelReconnect: (accountId: string) => cancelReconnectPlan(accountId, String(accountId), '已手动停止'),
+        // 上游会话托管能力。
+        startAccountWorker, stopAccountWorker, detachAllWorkers,
     };
 }
 

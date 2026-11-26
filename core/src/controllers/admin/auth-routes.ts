@@ -8,6 +8,7 @@ const { getSchedulerRegistrySnapshot } = require('../../services/scheduler');
 const { createModuleLogger } = require('../../services/logger');
 const adminStore = require('../../models/admin-store');
 const userStore = require('../../models/user-store');
+const { getActiveWebBuildId } = require('./web-version');
 
 const {
     getClientIp,
@@ -75,7 +76,9 @@ function mountAuthRoutes(app: Application, ctx: AdminContext): void {
             return res.status(400).json({ ok: false, error: '请提供原密码和新密码' });
         }
         const username = String((req as any).currentUser?.username || 'admin');
-        const result = userStore.changeUserPassword(username, String(oldPassword), String(newPassword));
+        const result = username === 'admin'
+            ? adminStore.changePassword(String(oldPassword), String(newPassword))
+            : userStore.changeUserPassword(username, String(oldPassword), String(newPassword));
         if (result.ok) {
             // 只撤销当前用户的会话（含其所有设备与 socket），不再清空全局 token 影响其他用户。
             revokeUserSessions(ctx, username);
@@ -98,12 +101,13 @@ function mountAuthRoutes(app: Application, ctx: AdminContext): void {
     });
 
     app.get('/api/ping', (_req: Request, res: Response) => {
-        res.json({ ok: true, data: { ok: true, uptime: process.uptime(), version } });
+        res.json({ ok: true, data: { ok: true, uptime: process.uptime(), version, webBuildId: getActiveWebBuildId() } });
     });
 
-    app.get('/api/game-version', (_req: Request, res: Response) => {
+    app.get('/api/game-version', async (_req: Request, res: Response) => {
         const { clientVersion, wxClientVersion } = getRuntimeConfig();
-        res.json({ ok: true, clientVersion, wxClientVersion, botVersion: version });
+        const { getServiceSummary } = require('../../session/ipc');
+        res.json({ ok: true, clientVersion, wxClientVersion, botVersion: version, serviceSummary: await getServiceSummary() });
     });
 
     app.get('/api/auth/validate', (_req: Request, res: Response) => {

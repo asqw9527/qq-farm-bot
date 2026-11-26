@@ -37,7 +37,7 @@ export const useUserStore = defineStore('user', () => {
   const username = computed(() => userInfo.value?.username || '')
   const avatar = computed(() => userInfo.value?.avatar || '')
   const role = computed<UserRole>(() => userInfo.value?.role || 'admin')
-  const isAdmin = computed(() => role.value === 'admin' || role.value === 'super_admin')
+  const isAdmin = computed(() => role.value === 'admin')
 
   function applyUser(data: any) {
     if (!data) return

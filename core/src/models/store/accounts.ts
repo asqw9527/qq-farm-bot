@@ -20,11 +20,14 @@ function loadAccounts(): AccountsData {
         const raw = loaded.data;
         if (!raw || !Array.isArray(raw.accounts)) throw new Error('Invalid accounts data');
         const data = normalizeAccountsData(raw);
-        // 旧版本是明文 JSON：读到明文时立刻加密回写（含一次 .plain.bak 备份）。
-        // 迁移失败不阻塞读取，后续任何保存都会写成密文。
-        // 文件本来就不存在（首次启动）时不写：保持"没账号就没有文件"的原行为。
+        // 上游兼容：补齐旧账号缺失的 createdAt。
+        // 本地安全增强：旧版本是明文 JSON，读到明文时立刻加密回写（含一次 .plain.bak 备份）。
+        // 两者合并为一次保存，避免先明文回写再加密回写产生重复 I/O。
+        const needCreatedAtBackfill = raw.accounts.some((account: any) => !Number(account?.createdAt));
         if (!loaded.encrypted && !loaded.missing) {
             try { migratePlaintextIfNeeded(ACCOUNTS_FILE, data); } catch { /* 交给下次保存 */ }
+        } else if (needCreatedAtBackfill) {
+            saveAccounts(data);
         }
         accountsCache = data;
         return cloneAccounts(data);

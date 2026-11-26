@@ -1,9 +1,11 @@
 export {};
 /**
  * 兼容层：原单管理员存储已迁移到 user-store 的完整多用户体系。
- * 保留 getAdminInfo / validateAdmin / changePassword 三个接口，内部委托 user-store，
- * 确保旧调用方不受影响；admin 用户即 role='admin' 的用户记录。
+ * 保留 getAdminInfo / getCredentialFingerprint / validateAdmin / changePassword 四个接口，
+ * 内部委托 user-store，确保旧调用方与上游 session-tokens 不受影响；
+ * admin 用户即 role='admin' 的用户记录。
  */
+const crypto = require('node:crypto');
 const userStore = require('./user-store');
 
 interface AuthResult {
@@ -48,6 +50,16 @@ function getAdminInfo(): any {
     });
 }
 
+/**
+ * 凭据指纹：供上游 session-tokens 在管理员密码变更时自动吊销全部持久化会话。
+ * 本地多用户体系中 admin 的密码哈希来自 user-store，取不到时回退到固定值。
+ */
+function getCredentialFingerprint(): string {
+    const admin = userStore.getUserByUsername('admin');
+    const material = admin && admin.password ? String(admin.password) : 'admin';
+    return crypto.createHash('sha256').update(`admin:${material}`).digest('hex');
+}
+
 function validateAdmin(username: string, password: string, ip: string = 'unknown'): any {
     const result = userStore.validateUser(String(username), String(password), ip);
     if (!result.ok) {
@@ -66,4 +78,4 @@ function changePassword(oldPassword: string, newPassword: string): { ok: boolean
     return { ok: true, message: '密码修改成功' };
 }
 
-module.exports = { getAdminInfo, validateAdmin, changePassword };
+module.exports = { getAdminInfo, getCredentialFingerprint, validateAdmin, changePassword };
