@@ -18,7 +18,8 @@ interface DataProviderOptions {
     buildConfigSnapshotForAccount: (accountId: string) => any;
     broadcastGameConfigReload?: () => void;
     startWorker: (account: any, optionsOrSessionId?: { keepReconnectPlan?: boolean; skipCodeRefresh?: boolean } | string) => boolean | Promise<boolean>;
-    stopWorker: (accountId: string) => void | Promise<void>;
+    // 会话托管模式下注入的是 stopAccountWorker(account)，非托管模式内部按 account.id 处理。
+    stopWorker: (account: any) => void | Promise<void>;
     restartWorker: (account: any) => void | Promise<void>;
     cancelReconnect?: (accountId: string) => boolean;
     startAccountWorker?: (account: any) => boolean | Promise<boolean>;

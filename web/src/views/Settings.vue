@@ -2261,11 +2261,11 @@ onBeforeUnmount(() => {
                     <h4 class="text-base text-gray-900 font-bold dark:text-gray-100">
                       运行环境
                     </h4>
-                  <p class="mt-0.5 text-xs text-gray-500 dark:text-gray-400">
-                    服务器连接、时区与客户端设备参数
-                  </p>
+                    <p class="mt-0.5 text-xs text-gray-500 dark:text-gray-400">
+                      服务器连接、时区与客户端设备参数
+                    </p>
+                  </div>
                 </div>
-              </div>
 
               <div v-if="systemConfigLoading" class="py-8 text-center text-gray-500">
                 <span class="i-svg-spinners-90-ring-with-bg inline-block text-2xl" />
