@@ -3,7 +3,7 @@ import type { AdminContext } from './context';
 export {};
 
 const systemUpdate = require('../../services/system-update');
-const { createAuthRequired, handleApiError } = require('./middleware');
+const { createAuthRequired, handleApiError, requireAdmin } = require('./middleware');
 
 function sendUpdateError(res: Response, err: any): void {
     if (Number.isInteger(err?.statusCode)) {
@@ -19,6 +19,11 @@ function sendUpdateError(res: Response, err: any): void {
 
 function mountSystemUpdateRoutes(app: Application, ctx: AdminContext): void {
     const authRequired = createAuthRequired(ctx);
+
+    // 上游原本是单管理员体系，authRequired 即等于管理员校验。合并进本地多用户体系后，
+    // 普通用户也能拿到有效 token；在线更新会拉取远端代码、构建并重启服务，属于系统级操作，
+    // 必须显式要求管理员角色。统一挂在前缀上，后续新增接口不会漏掉。
+    app.use('/api/system/update', requireAdmin);
 
     app.get('/api/system/update/status', authRequired, async (_req: Request, res: Response) => {
         try {

@@ -115,7 +115,62 @@ async function loginTaskChecks() {
     console.log('ok 5 - QQ 登录任务 owner 隔离且旧任务失效');
 }
 
-loginTaskChecks().then(() => console.log('\n权限修复回归测试全部通过')).catch((err) => {
+// 6) 在线更新属于系统级操作，普通用户不得触发远端拉取 / 构建重启 / 版本回滚
+function systemUpdateAuthChecks() {
+    const mock = (name, exports) => {
+        const id = require.resolve(name);
+        require.cache[id] = { id, filename: id, loaded: true, exports };
+    };
+    // 屏蔽 system-update 的重依赖，只验证路由挂载与角色校验行为。
+    mock(path.join(DIST, 'services', 'system-update.js'), {
+        getSystemUpdateStatus: () => ({}),
+        checkSystemUpdates: () => ({}),
+        pullSystemUpdates: () => ({}),
+        applySystemUpdate: () => ({}),
+        rollbackSystemRelease: () => ({}),
+        deleteSystemReleases: () => ({}),
+        setSystemBackupEnabled: () => ({}),
+    });
+
+    const routesPath = path.join(DIST, 'controllers', 'admin', 'system-update-routes.js');
+    delete require.cache[routesPath];
+    const { mountSystemUpdateRoutes } = require(routesPath);
+
+    const useMiddlewares = [];
+    const routes = new Map();
+    const app = {
+        use: (routePath, handler) => useMiddlewares.push({ routePath, handler }),
+        get: (routePath, ...handlers) => routes.set(routePath, handlers),
+        post: (routePath, ...handlers) => routes.set(routePath, handlers),
+        put: (routePath, ...handlers) => routes.set(routePath, handlers),
+        delete: (routePath, ...handlers) => routes.set(routePath, handlers),
+    };
+    mountSystemUpdateRoutes(app, { tokens: { has: () => true }, tokenUsers: new Map() });
+
+    assert.equal(routes.size, 7, '在线更新接口应全部注册');
+    const guard = useMiddlewares.find(item => item.routePath === '/api/system/update');
+    assert.ok(guard, '在线更新前缀必须挂载管理员角色校验');
+
+    const run = (currentUser) => {
+        let status = 0;
+        let nextCalled = false;
+        const res = { status(value) { status = value; return this; }, json() {} };
+        guard.handler({ currentUser }, res, () => { nextCalled = true; });
+        return { status, nextCalled };
+    };
+
+    const userResult = run(JMY);
+    assert.equal(userResult.status, 403, '普通用户必须被拒绝');
+    assert.equal(userResult.nextCalled, false, '普通用户不得进入在线更新处理函数');
+    const adminResult = run(ADMIN);
+    assert.equal(adminResult.nextCalled, true, '管理员必须放行');
+    console.log('ok 6 - 在线更新接口仅管理员可访问');
+}
+
+loginTaskChecks().then(() => {
+    systemUpdateAuthChecks();
+    console.log('\n权限修复回归测试全部通过');
+}).catch((err) => {
     console.error(err);
     process.exitCode = 1;
 });
