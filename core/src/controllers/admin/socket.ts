@@ -26,7 +26,9 @@ function socketRequest(ctx: AdminContext, socket: any): any {
         const resolvedUser = userStore.getAuthResultByToken(token);
         if (resolvedUser) currentUser = resolvedUser;
     }
-    if (!currentUser) currentUser = { username: 'admin', role: 'admin', accountLimit: -1 };
+    // 纵深防御：连接鉴权已拒绝无映射 token；这里即使遇到也不能回退成 admin，
+    // 更不能留空（可见性函数会把空身份当作管理员返回全量日志）。
+    if (!currentUser) currentUser = { username: '__unauthenticated__', role: 'guest', accountLimit: 0 };
     return { currentUser, headers: {} };
 }
 
@@ -131,10 +133,16 @@ function setupSocketIO(ctx: AdminContext): void {
         if (!token || !ctx.tokens.has(token)) {
             return next(new Error('Unauthorized'));
         }
-        // 普通用户 token 需与 HTTP 保持一致的实时校验（到期/卡密失效即时断连）。
+        // 身份映射只存在于内存，重启后持久化 token 仍在但身份已丢失；
+        // 与 HTTP 中间件保持一致：解析不出用户一律拒绝，绝不按管理员放行。
         const resolvedUser = ctx.tokenUsers && ctx.tokenUsers.get(token)
             || userStore.getAuthResultByToken(token);
-        if (resolvedUser && resolvedUser.role !== 'admin' && resolvedUser.role !== 'super_admin') {
+        if (!resolvedUser) {
+            ctx.tokens.delete(token);
+            return next(new Error('Unauthorized'));
+        }
+        // 普通用户 token 需与 HTTP 保持一致的实时校验（到期/卡密失效即时断连）。
+        if (resolvedUser.role !== 'admin' && resolvedUser.role !== 'super_admin') {
             const validated = userStore.validateUserToken(token);
             if (!validated.ok) {
                 ctx.tokens.delete(token);

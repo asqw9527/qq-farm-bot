@@ -167,8 +167,50 @@ function systemUpdateAuthChecks() {
     console.log('ok 6 - 在线更新接口仅管理员可访问');
 }
 
+// 7) 重启后持久化的历史 token 不得提权为管理员。
+// ctx.tokens 从 admin-sessions.json 恢复，而 ctx.tokenUsers / user-store.userTokens
+// 都是纯内存 Map，重启即清空。旧实现会把无映射 token 回退成 admin，导致普通用户提权。
+function restartSessionChecks() {
+    const createAuthRequired = middleware.createAuthRequired;
+    assert.equal(typeof createAuthRequired, 'function', 'middleware 必须导出 createAuthRequired');
+
+    const staleToken = 'stale-token-after-restart';
+    const ctx = {
+        tokens: new Set([staleToken]),
+        tokenUsers: new Map(),
+        provider: { getAccounts: () => ({ accounts: [] }) },
+    };
+    const authRequired = createAuthRequired(ctx);
+
+    const run = (token) => {
+        let status = 200;
+        let nextCalled = false;
+        const req = { headers: { 'x-admin-token': token } };
+        const res = { status(value) { status = value; return this; }, json() {} };
+        authRequired(req, res, () => { nextCalled = true; });
+        return { status, nextCalled, req };
+    };
+
+    const stale = run(staleToken);
+    assert.equal(stale.status, 401, '重启后无身份映射的历史 token 必须返回 401');
+    assert.equal(stale.nextCalled, false, '历史 token 不得进入路由处理函数');
+    assert.equal(stale.req.currentUser, undefined, '不得回退成 admin 身份');
+    assert.equal(ctx.tokens.has(staleToken), false, '失效 token 应从持久化集合清除');
+
+    // 本次进程内正常登录的管理员不受影响。
+    const adminToken = 'live-admin-token';
+    ctx.tokens.add(adminToken);
+    ctx.tokenUsers.set(adminToken, ADMIN);
+    const live = run(adminToken);
+    assert.equal(live.nextCalled, true, '正常登录的管理员必须放行');
+    assert.equal(live.req.currentUser.role, 'admin', '管理员身份应正确解析');
+
+    console.log('ok 7 - 重启后历史 token 不提权、正常登录不受影响');
+}
+
 loginTaskChecks().then(() => {
     systemUpdateAuthChecks();
+    restartSessionChecks();
     console.log('\n权限修复回归测试全部通过');
 }).catch((err) => {
     console.error(err);

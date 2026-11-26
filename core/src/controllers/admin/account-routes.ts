@@ -83,7 +83,8 @@ function mountAccountRoutes(app: Application, ctx: AdminContext): void {
             if (!requestedName) {
                 return res.status(400).json({ ok: false, error: '账号备注不能为空' });
             }
-            const currentUser = (req as any).currentUser || { username: 'admin', role: 'admin', accountLimit: -1 };
+            const currentUser = (req as any).currentUser;
+            if (!currentUser) return res.status(401).json({ ok: false, error: '登录已失效，请重新登录' });
             const currentUsername = String(currentUser.username || 'admin');
             const adminMode = currentUser.role === 'admin' || currentUser.role === 'super_admin';
             const allAccountsRaw = ctx.provider.getAccounts ? ctx.provider.getAccounts() : { accounts: [] };

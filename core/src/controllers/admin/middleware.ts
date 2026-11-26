@@ -41,13 +41,20 @@ function createAuthRequired(ctx: AdminContext) {
             return;
         }
         req.adminToken = token;
-        // 解析当前登录用户；兼容旧 token（无映射）按超级管理员处理
+        // 身份只认本次进程内的登录映射（ctx.tokenUsers 或 user-store 的 userTokens）。
+        // ctx.tokens 是持久化集合，重启后会从 admin-sessions.json 恢复哈希；而两处身份
+        // 映射都是纯内存，重启即清空。此时绝不能回退成 admin，否则普通用户的历史 token
+        // 会在重启后提权为管理员，绕过 requireAdmin、账号归属隔离与在线更新角色校验。
         let currentUser = ctx.tokenUsers && ctx.tokenUsers.get(token);
         if (!currentUser) {
             const resolved = userStore.getAuthResultByToken(token);
             if (resolved) currentUser = resolved;
         }
-        if (!currentUser) currentUser = { username: 'admin', role: 'admin', accountLimit: -1 };
+        if (!currentUser) {
+            ctx.tokens.delete(token);
+            res.status(401).json({ ok: false, error: '登录已失效，请重新登录', errorType: 'expired' });
+            return;
+        }
         // 普通用户每次请求实时校验：token 24h 过期、卡密到期、账号删除/额度变更即时失效。
         // 管理员 token 无 TTL 且不受卡密约束，沿用缓存逻辑保持兼容。
         if (currentUser.role !== 'admin' && currentUser.role !== 'super_admin') {
@@ -139,13 +146,15 @@ function getAccountIds(ctx: AdminContext, req?: AuthenticatedRequest): string[] 
 }
 
 // 账号操作日志：普通用户仅可见归属自己账号的日志；管理员可见全部。
+// 无身份上下文时返回空，避免"未解析出用户"被当成管理员而泄露全局日志。
 function getVisibleAccountLogs(ctx: AdminContext, req: AuthenticatedRequest | undefined, limit: number): any[] {
     let list: any[] = [];
     if (ctx.provider && typeof ctx.provider.getAccountLogs === 'function') {
         const data = ctx.provider.getAccountLogs(limit);
         if (Array.isArray(data)) list = data;
     }
-    if (!req || !req.currentUser || isAdminUser(req)) return list;
+    if (!req || !req.currentUser) return [];
+    if (isAdminUser(req)) return list;
     const ids = new Set(getAccountIds(ctx, req));
     return list.filter(entry => ids.has(String(entry?.accountId || '')));
 }
@@ -153,12 +162,13 @@ function getVisibleAccountLogs(ctx: AdminContext, req: AuthenticatedRequest | un
 // 运行日志快照：accountId 为空表示"全部账号"。普通用户按可见账号逐账号取日志再合并，
 // 避免 provider.getLogs('') 直接返回全局日志造成跨用户泄露。
 function getVisibleLogs(ctx: AdminContext, req: AuthenticatedRequest | undefined, accountId: string, options: any = {}): any[] {
+    if (!req || !req.currentUser) return [];
     if (!ctx.provider || typeof ctx.provider.getLogs !== 'function') return [];
     if (accountId) {
         const data = ctx.provider.getLogs(accountId, options);
         return Array.isArray(data) ? data : [];
     }
-    if (!req || !req.currentUser || isAdminUser(req)) {
+    if (isAdminUser(req)) {
         const data = ctx.provider.getLogs('', options);
         return Array.isArray(data) ? data : [];
     }
