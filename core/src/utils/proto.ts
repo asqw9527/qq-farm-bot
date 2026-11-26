@@ -295,6 +295,19 @@ async function loadProto(): Promise<void> {
         types[name] = root.lookupType(`gamepb.activitypb.${name}`);
     }
     types.CharityRedFlowerProgressRewardResult = root.lookupType('gamepb.activitypb.CharityRedFlowerProgressRewardResult');
+    // 以薯换福（活动组 2026111707 / 主模块 2026111708）：命令走 Operate 的 cmd，
+    // 参数与回包挂在 190+cmd 号槽位，与老式 operate_type 协议不同。
+    types.YshfState = root.lookupType('gamepb.activitypb.YshfState');
+    types.YshfCatalog = root.lookupType('gamepb.activitypb.YshfCatalog');
+    types.YshfClaimSeedRequest = root.lookupType('gamepb.activitypb.YshfClaimSeedRequest');
+    types.YshfShopQueryRequest = root.lookupType('gamepb.activitypb.YshfShopQueryRequest');
+    types.YshfSellRequest = root.lookupType('gamepb.activitypb.YshfSellRequest');
+    types.YshfExchangeRequest = root.lookupType('gamepb.activitypb.YshfExchangeRequest');
+    types.YshfRecordRequest = root.lookupType('gamepb.activitypb.YshfRecordRequest');
+    types.YshfClaimCommissionRequest = root.lookupType('gamepb.activitypb.YshfClaimCommissionRequest');
+    types.YshfCatalogRequest = root.lookupType('gamepb.activitypb.YshfCatalogRequest');
+    types.YshfShareRequest = root.lookupType('gamepb.activitypb.YshfShareRequest');
+    types.ActivityData = root.lookupType('gamepb.activitypb.ActivityData');
     types.ActivityOperateReply = root.lookupType('gamepb.activitypb.ActivityOperateReply');
     types.GetWeatherStatusRequest = root.lookupType('gamepb.weatherpb.GetWeatherStatusRequest');
     types.GetWeatherStatusReply = root.lookupType('gamepb.weatherpb.GetWeatherStatusReply');

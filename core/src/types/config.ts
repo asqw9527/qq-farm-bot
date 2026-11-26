@@ -46,6 +46,16 @@ export interface AutomationConfig extends RanchAutomationConfig {
   fertilizer_smart_seconds: number;
   skip_own_weed_bug: boolean;
   show_manual_fertilizer: boolean;
+  // 以薯换福（2026-11-25 ~ 2026-12-09）：会改状态的动作默认关闭，由用户主动开启。
+  yishu_claim_seed: boolean;
+  yishu_share: boolean;
+  yishu_auto_sell: boolean;
+  yishu_claim_commission: boolean;
+  yishu_sell_fallback_own: boolean;
+  yishu_scan_friend_limit: number;
+  yishu_scan_interval_minutes: number;
+  yishu_sell_min_count: number;
+  yishu_sell_after_time: string;
 }
 
 export interface IntervalConfig {

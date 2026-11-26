@@ -112,6 +112,23 @@ const displayActivities = computed<ActivityDirectoryItemDto[]>(() => {
     })
   }
 
+  // 以薯换福（2026-11-25 ~ 2026-12-09，UTC+8）：服务端活动窗口不一定下发
+  // 2026111707 活动组，按登记的活动期补一张卡片，保证活动期内入口可见。
+  const yishuStartMs = Date.parse('2026-11-25T00:00:00+08:00')
+  const yishuEndMs = Date.parse('2026-12-09T23:59:59+08:00')
+  if (Date.now() <= yishuEndMs) {
+    appendDetailEntry({
+      id: '2026111707',
+      activityIds: ['2026111707', '2026111708', '2026111709'],
+      name: '以薯换福',
+      startTime: yishuStartMs,
+      endTime: yishuEndMs,
+      gameplayKey: 'yishuhuanfu',
+      gameplayTargets: ['yishuhuanfu'],
+      detailTarget: 'yishuhuanfu',
+    })
+  }
+
   const statusRank: Record<ActivityStatus, number> = { active: 0, upcoming: 1, ended: 2 }
   return entries.sort((left, right) => {
     const leftStatus = activityStatus(left)

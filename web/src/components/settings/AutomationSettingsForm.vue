@@ -469,6 +469,76 @@ const ranchFeedStages = [
             到货提醒可单独开启；购买提醒需先打开自动购买。
           </p>
         </section>
+        <section class="farm-card rounded-2xl p-4">
+          <div class="mb-4 flex items-start gap-3">
+            <div class="h-9 w-9 flex shrink-0 items-center justify-center rounded-lg bg-orange-50 text-orange-600 dark:bg-orange-900/25 dark:text-orange-400">
+              <span class="i-carbon-settings-adjust text-xl" />
+            </div>
+            <div>
+              <h4 class="text-base text-gray-900 font-bold dark:text-gray-100">以薯换福</h4>
+              <p class="mt-0.5 text-xs text-gray-500 dark:text-gray-400">2026-11-25 ~ 2026-12-09 · 领种子、分享、比价卖薯与收购提成</p>
+            </div>
+          </div>
+          <div class="grid grid-cols-1 gap-2 sm:grid-cols-2">
+                <BaseSwitch
+                  :model-value="!!settings.automation.yishu_claim_seed"
+                  label="自动领取红薯种子"
+                  @update:model-value="settings.automation.yishu_claim_seed = $event"
+                />
+                <BaseSwitch
+                  :model-value="!!settings.automation.yishu_share"
+                  label="自动分享铺子"
+                  @update:model-value="settings.automation.yishu_share = $event"
+                />
+                <BaseSwitch
+                  :model-value="!!settings.automation.yishu_auto_sell"
+                  label="自动比价卖薯"
+                  @update:model-value="settings.automation.yishu_auto_sell = $event"
+                />
+                <BaseSwitch
+                  :model-value="!!settings.automation.yishu_claim_commission"
+                  label="自动领取收购提成"
+                  @update:model-value="settings.automation.yishu_claim_commission = $event"
+                />
+                <BaseSwitch
+                  :model-value="!!settings.automation.yishu_sell_fallback_own"
+                  label="好友收满时卖给自己"
+                  @update:model-value="settings.automation.yishu_sell_fallback_own = $event"
+                />
+          </div>
+          <div class="mt-3 grid grid-cols-1 gap-3 sm:grid-cols-2 xl:grid-cols-4">
+                <BaseInput
+                  :model-value="settings.automation.yishu_scan_friend_limit ?? 0"
+                  label="比价好友上限 (1-200)"
+                  type="number"
+                  min="1" max="200"
+                  @update:model-value="settings.automation.yishu_scan_friend_limit = Number($event) || 0"
+                />
+                <BaseInput
+                  :model-value="settings.automation.yishu_scan_interval_minutes ?? 0"
+                  label="比价间隔 (分钟)"
+                  type="number"
+                  min="5" max="720"
+                  @update:model-value="settings.automation.yishu_scan_interval_minutes = Number($event) || 0"
+                />
+                <BaseInput
+                  :model-value="settings.automation.yishu_sell_min_count ?? 0"
+                  label="起卖蜜薯数量"
+                  type="number"
+                  min="1" max="10000"
+                  @update:model-value="settings.automation.yishu_sell_min_count = Number($event) || 0"
+                />
+                <BaseInput
+                  :model-value="settings.automation.yishu_sell_after_time ?? ''"
+                  label="开始售卖时间 (HH:MM)"
+                  placeholder="留空为不限时段"
+                  @update:model-value="settings.automation.yishu_sell_after_time = String($event ?? '')"
+                />
+          </div>
+          <p class="mt-3 text-xs text-gray-500 dark:text-gray-400">
+            到点之后每轮自动任务（10 分钟）按当日最高价卖薯；比价只读、不成交，最终价格以出售回包为准。自动卖薯会占用好友铺子当日额度。
+          </p>
+        </section>
       </div>
     </div>
 
